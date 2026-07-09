@@ -1,0 +1,25 @@
+# Builds on top of the unmodified upstream builder stage — this file is the
+# only thing that differs from upstream, so future syncs never conflict.
+FROM plunk-builder:v0.12.0 AS builder
+
+FROM node:20-alpine AS api-runner
+WORKDIR /app
+COPY --from=builder /app/apps/api/dist ./apps/api/dist
+COPY --from=prod-deps /app/node_modules ./node_modules
+COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder /app/packages/db/dist ./packages/db/dist
+COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
+COPY --from=builder /app/packages/email/dist ./packages/email/dist
+COPY --from=builder /app/packages/types/dist ./packages/types/dist
+EXPOSE 8080
+CMD ["node", "apps/api/dist/app.js"]
+
+FROM api-runner AS worker-runner
+CMD ["node", "apps/api/dist/jobs/worker.js"]
+
+FROM node:20-alpine AS web-runner
+WORKDIR /app
+COPY --from=builder /app/apps/web/.next/standalone ./
+EXPOSE 3000
+ENV PORT=3000 HOSTNAME=0.0.0.0
+CMD ["node", "apps/web/.next/standalone/apps/web/server.js"]
