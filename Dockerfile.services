@@ -1,21 +1,99 @@
-FROM plunk-builder:v0.12.0 AS builder
-FROM plunk-prod-deps:v0.12.0 AS prod-deps
+# =============================================================================
+# Split-service Dockerfile for Plunk
+#
+# Produces small, single-purpose runtime images (api, worker, web) that can be
+# deployed individually (e.g. one Cloud Run service per image) instead of the
+# all-in-one nginx image built by the root Dockerfile.
+#
+# They build on top of two base images taken straight from the main Dockerfile's
+# `builder` and `prod-deps` stages, so the heavy dependency install + compile
+# only happens once:
+#
+#   docker build --target builder   -t plunk-builder:${PLUNK_VERSION}   -f Dockerfile .
+#   docker build --target prod-deps -t plunk-prod-deps:${PLUNK_VERSION} -f Dockerfile .
+#
+# Then build the individual service images:
+#
+#   docker build --target api-runner    -t plunk-api:${PLUNK_VERSION}    -f Dockerfile.services .
+#   docker build --target worker-runner -t plunk-worker:${PLUNK_VERSION} -f Dockerfile.services .
+#   docker build --target web-runner    -t plunk-web:${PLUNK_VERSION}    -f Dockerfile.services .
+#
+# The API/worker read all configuration (including the *_URI values) from the
+# environment at runtime. Database migrations are not run automatically; run
+# them once on deploy with the API image, e.g.:
+#
+#   docker run --rm --env-file .env plunk-api:${PLUNK_VERSION} \
+#     node_modules/.bin/prisma migrate deploy --schema=packages/db/prisma/schema.prisma
+# =============================================================================
 
+ARG PLUNK_VERSION=v0.12.0
+
+FROM plunk-builder:${PLUNK_VERSION} AS builder
+FROM plunk-prod-deps:${PLUNK_VERSION} AS prod-deps
+
+# =============================================================================
+# API server
+# =============================================================================
 FROM node:20-alpine AS api-runner
 WORKDIR /app
+
+# OpenSSL is required by the Prisma query engine at runtime (Alpine does not
+# ship it by default); curl is used by container health checks.
+RUN apk add --no-cache openssl curl
+
+# --- Compiled application code ------------------------------------------------
 COPY --from=builder /app/apps/api/dist ./apps/api/dist
+
+# --- Production dependencies --------------------------------------------------
+# Includes the yarn workspace symlinks (node_modules/@plunk/*) and the Prisma CLI
+# (node_modules/.bin/prisma) used to run migrations.
 COPY --from=prod-deps /app/node_modules ./node_modules
+
+# --- Prisma generated client + engines ---------------------------------------
+# Generated in the builder with the musl binary targets declared in schema.prisma,
+# so the engine loads on this Alpine (musl) runtime.
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+
+# --- Workspace packages: built output AND their package.json manifests --------
+# The compiled API is native ESM (module: NodeNext). Node resolves the
+# `@plunk/*` imports through each package's `exports`/`main`/`type` fields via
+# the node_modules symlinks. WITHOUT these package.json files the imports fail
+# with ERR_MODULE_NOT_FOUND and the container crashes on startup — this was the
+# root cause of the API container failing to boot.
 COPY --from=builder /app/packages/db/dist ./packages/db/dist
+COPY --from=builder /app/packages/db/package.json ./packages/db/package.json
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
+COPY --from=builder /app/packages/shared/package.json ./packages/shared/package.json
 COPY --from=builder /app/packages/email/dist ./packages/email/dist
+COPY --from=builder /app/packages/email/package.json ./packages/email/package.json
 COPY --from=builder /app/packages/types/dist ./packages/types/dist
+COPY --from=builder /app/packages/types/package.json ./packages/types/package.json
+
+# --- Prisma schema (needed to run `prisma migrate deploy`) --------------------
+COPY --from=builder /app/packages/db/prisma ./packages/db/prisma
+
+# --- Manifests that mark the app + workspace root as ESM ----------------------
+# `apps/api/package.json` carries `"type": "module"`, which Node needs to load
+# the compiled dist/*.js files as ES modules rather than CommonJS. The root
+# package.json is the workspace-root fallback.
+COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
+COPY --from=builder /app/package.json ./package.json
+
+ENV NODE_ENV=production
+# The API listens on $PORT (defaults to 8080) on 0.0.0.0.
 EXPOSE 8080
 CMD ["node", "apps/api/dist/app.js"]
 
+# =============================================================================
+# Background worker (same runtime as the API, different entrypoint)
+# =============================================================================
 FROM api-runner AS worker-runner
 CMD ["node", "apps/api/dist/jobs/worker.js"]
 
+# =============================================================================
+# Web dashboard (Next.js standalone)
+# =============================================================================
 FROM node:20-alpine AS web-runner
 WORKDIR /app
 COPY --from=builder /app/apps/web/.next/standalone ./
