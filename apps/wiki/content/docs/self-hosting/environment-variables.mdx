@@ -140,6 +140,7 @@ Variables for unusual deployments. The defaults work for the standard Docker Com
 | Variable     | Required | Description                                                                                                              | Default |
 | ------------ | -------- | ------------------------------------------------------------------------------------------------------------------------ | ------- |
 | `NGINX_PORT` | No       | Host port the bundled Nginx reverse proxy binds to. Override when port 80/443 is already in use on the host (e.g. running behind another reverse proxy that forwards to a different port). | `80`    |
+| `WORKER_HEALTH_PORT` | No | Port the worker process serves its health endpoint (`GET /health`) on, reporting whether the queue consumers have started. The worker is a queue consumer rather than an HTTP server, so this exists purely for container health probes. The all-in-one image pins it to `8081` because the API already owns `8080` in the shared container. Falls back to `PORT`, then `8081`. | `8081`  |
 
 ## Phishing Detection
 

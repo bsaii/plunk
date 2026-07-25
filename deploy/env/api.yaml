@@ -1,0 +1,27 @@
+# Literal environment for the plunk-api Cloud Run service.
+#
+# Applied with `gcloud run deploy --env-vars-file`, which REPLACES the service's
+# full set of literal env vars on every deploy. That is the point: this file is
+# the source of truth, so a value someone edits in the console does not survive
+# the next deploy.
+#
+# Secrets do NOT belong here — they are Secret Manager references passed via
+# API_SECRETS in deploy/config.env. Everything apps/api/src/app/constants.ts
+# requires must be in one place or the other, or the process throws on import.
+#
+# All four *_URI values need a scheme and no trailing slash. DASHBOARD_URI is
+# the API's CORS allowlist entry and must byte-match the origin the browser
+# loads the dashboard from.
+
+NODE_ENV: production
+PORT: '8080'
+
+API_URI: https://api.example.com
+DASHBOARD_URI: https://app.example.com
+LANDING_URI: https://www.example.com
+WIKI_URI: https://docs.example.com
+
+# Region of the SES identity, not necessarily the Cloud Run region.
+AWS_SES_REGION: eu-west-1
+SES_CONFIGURATION_SET: plunk-configuration-set
+SES_CONFIGURATION_SET_NO_TRACKING: plunk-configuration-set-no-tracking

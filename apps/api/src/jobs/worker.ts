@@ -6,6 +6,8 @@
  * node dist/jobs/worker.js
  */
 
+import {createServer} from 'node:http';
+
 import {Worker} from 'bullmq';
 import signale from 'signale';
 
@@ -21,6 +23,80 @@ import {createSegmentCountWorker} from './segment-count-processor.js';
 import {createWorkflowWorker} from './workflow-processor-queue.js';
 
 const workers: {name: string; worker: Worker}[] = [];
+
+let ready = false;
+
+/**
+ * Health endpoint for container liveness probes.
+ *
+ * The worker serves no traffic — it is deployed as a Cloud Run worker pool,
+ * which does not require a listener at all — so this exists purely so the
+ * platform (and the compose/self-host healthcheck) can distinguish a running
+ * instance from a wedged one.
+ *
+ * Port resolution: WORKER_HEALTH_PORT wins, then PORT (injected by the platform,
+ * so deploying this as a plain Cloud Run service also works with no extra
+ * configuration), then 8081. The 8081 fallback keeps the all-in-one image —
+ * where the API and the worker share a container — off the API's 8080.
+ */
+const healthPort = Number(process.env.WORKER_HEALTH_PORT ?? process.env.PORT ?? 8081);
+
+/**
+ * Whether the queues are actually reachable.
+ *
+ * Checking only that startWorkers() finished is not enough: BullMQ constructs
+ * its workers happily while ioredis reconnects in the background, so a worker
+ * that has never reached Redis — and is therefore consuming nothing — still
+ * looks fully started. Reporting the connection state is the difference between
+ * a probe that detects a wedged instance and one that always says "ok".
+ */
+async function queuesConnected() {
+  const first = workers[0];
+
+  if (!first) {
+    return false;
+  }
+
+  try {
+    // `worker.client` does not settle while Redis is unreachable, so awaiting it
+    // bare would hang the probe rather than fail it — which reads as a timeout to
+    // the caller instead of an unhealthy instance. Bound it.
+    const timeout = new Promise<null>(resolve => {
+      setTimeout(() => resolve(null), 500).unref();
+    });
+
+    const client = await Promise.race([first.worker.client, timeout]);
+
+    return client !== null && client.status === 'ready';
+  } catch {
+    return false;
+  }
+}
+
+const healthServer = createServer((req, res) => {
+  if (req.url !== '/health' && req.url !== '/') {
+    res.writeHead(404).end();
+    return;
+  }
+
+  void (async () => {
+    const connected = ready && (await queuesConnected());
+
+    const body = JSON.stringify({
+      status: connected ? 'ok' : ready ? 'disconnected' : 'starting',
+      workers: workers.map(({name}) => name),
+    });
+
+    res.writeHead(connected ? 200 : 503, {'content-type': 'application/json'}).end(body);
+  })();
+});
+
+// A port clash must not take down job processing: the all-in-one image runs this
+// alongside the API under pm2, and losing the queue consumers is far worse than
+// losing the probe.
+healthServer.on('error', error => {
+  signale.warn(`[WORKER] Health server unavailable on port ${healthPort}:`, error);
+});
 
 async function startWorkers() {
   signale.info('[WORKER] Starting queue workers...');
@@ -76,6 +152,7 @@ async function startWorkers() {
     workers.push({name: 'meter', worker: meterWorker});
     signale.success('[WORKER] Meter worker started');
 
+    ready = true;
     signale.success('[WORKER] All workers started successfully');
   } catch (error) {
     signale.error('[WORKER] Failed to start workers:', error);
@@ -85,6 +162,9 @@ async function startWorkers() {
 
 async function stopWorkers() {
   signale.info('[WORKER] Stopping workers...');
+
+  ready = false;
+  healthServer.close();
 
   for (const {name, worker} of workers) {
     try {
@@ -118,6 +198,12 @@ process.on('uncaughtException', error => {
 process.on('unhandledRejection', (reason, promise) => {
   signale.error('[WORKER] Unhandled rejection at:', promise, 'reason:', reason);
   void stopWorkers();
+});
+
+// Bind the health port before the queues connect, so a platform probing for
+// liveness sees "starting" rather than a refused connection.
+healthServer.listen(healthPort, '0.0.0.0', () => {
+  signale.info(`[WORKER] Health endpoint on :${healthPort}/health`);
 });
 
 // Start workers

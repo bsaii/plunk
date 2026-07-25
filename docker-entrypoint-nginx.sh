@@ -123,6 +123,9 @@ module.exports = {
       watch: false,
       env: {
         NODE_ENV: 'production',
+        // Set explicitly: the worker's health endpoint falls back to PORT, and
+        // the API already owns 8080 in this shared container.
+        WORKER_HEALTH_PORT: 8081,
         API_URI: '${API_URI}',
         DASHBOARD_URI: '${DASHBOARD_URI}',
         LANDING_URI: '${LANDING_URI}',

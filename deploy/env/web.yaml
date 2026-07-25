@@ -1,0 +1,17 @@
+# Literal environment for the plunk-web Cloud Run service.
+#
+# The dashboard is a pure frontend — no database, Redis or S3 credentials — so
+# there are no secrets, only the four URLs.
+#
+# The Next.js bundle is compiled with placeholder URLs baked in;
+# docker/web-entrypoint.sh rewrites them from these values at container start
+# and mirrors them onto the NEXT_PUBLIC_* names. That is what makes one image
+# deployable to any environment, and why DASHBOARD_URI can be set after the
+# first deploy assigns the service its URL.
+
+NODE_ENV: production
+
+API_URI: https://api.example.com
+DASHBOARD_URI: https://app.example.com
+LANDING_URI: https://www.example.com
+WIKI_URI: https://docs.example.com

@@ -1,0 +1,54 @@
+# Controls what `gcloud builds submit` uploads as the build source.
+#
+# Without this file gcloud derives the ignore list from .gitignore, which leaves
+# the entire .git directory in the upload. This file takes over completely — it
+# does NOT chain to .gitignore — so anything the Docker build needs must survive
+# the patterns below.
+#
+# Must keep (do not add): Dockerfile, Dockerfile.services, docker/, package.json,
+# yarn.lock, .yarnrc.yml, .yarn/releases, turbo.json, apps/, packages/, deploy/.
+
+.git
+.gitignore
+.gitattributes
+.github
+
+# Dependencies and build outputs — the image builds these from source.
+node_modules
+**/node_modules
+**/.next
+**/dist
+**/.turbo
+**/build
+**/out
+.source
+**/.source
+.yarn/cache
+.yarn/install-state.gz
+install-state.gz
+
+# Local environment and deploy config (values live in Secret Manager / the
+# service's own env, never in the build source).
+.env
+.env.*
+!.env.self-host.example
+deploy/config.env
+
+# Tests, coverage and editor state.
+test
+coverage
+.nyc_output
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+vitest.config.ts
+.vscode
+.idea
+.DS_Store
+*.log
+
+# Docs are not part of any image.
+docs
+*.md
+!README.md

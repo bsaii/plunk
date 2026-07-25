@@ -1,0 +1,305 @@
+# =============================================================================
+# Plunk — build, push and deploy to Cloud Run.
+#
+# One definition, two entry points:
+#   • manually, from a checkout:  ./scripts/deploy.sh   (yarn deploy)
+#   • automatically, on push:     a Cloud Build GitHub trigger
+# Both run this file, so there is no second pipeline to keep in sync.
+#
+# Produces three images from the two Dockerfiles already in the repo:
+#   plunk-api    → Cloud Run service     (HTTP + in-process cron)
+#   plunk-worker → Cloud Run worker pool (BullMQ consumer, no HTTP)
+#   plunk-web    → Cloud Run service     (Next.js dashboard)
+#
+# Dockerfile.services builds `FROM plunk-builder:$_TAG` / `plunk-prod-deps:$_TAG`
+# rather than from source. Those tags are produced by the first steps here and
+# resolve because every step on a build shares one Docker daemon.
+# =============================================================================
+
+substitutions:
+  _REGION: europe-west1
+  _AR_REPO: plunk
+  # Overwritten per-run by scripts/deploy.sh (commit sha) or by the trigger.
+  _TAG: latest
+  # Which workloads this run touches — `./scripts/deploy.sh --only web`.
+  _TARGETS: api,worker,web
+
+  _API_SERVICE: plunk-api
+  _WEB_SERVICE: plunk-web
+  _WORKER_POOL: plunk-worker
+  _WORKER_INSTANCES: '1'
+
+  # Existing Cloud Run Job that runs `prisma migrate deploy`. Empty disables the
+  # migration step entirely.
+  _MIGRATE_JOB: ''
+  _RUN_MIGRATIONS: 'true'
+
+  _RUNTIME_SA: ''
+  _API_SECRETS: ''
+  _WORKER_SECRETS: ''
+  _VPC_CONNECTOR: ''
+  _CLOUDSQL_INSTANCES: ''
+
+  # `run worker-pools` is GA but recent; pin a tag you have verified rather than
+  # inheriting whatever the legacy gcloud builder ships.
+  _CLOUD_SDK_IMAGE: gcr.io/google.com/cloudsdktool/cloud-sdk:latest
+
+options:
+  machineType: E2_HIGHCPU_8
+  diskSizeGb: 100
+  # Required once the build runs as a user-specified service account.
+  logging: CLOUD_LOGGING_ONLY
+  env:
+    # The root Dockerfile uses `RUN --mount=type=cache`, which the classic
+    # builder does not understand.
+    - DOCKER_BUILDKIT=1
+
+timeout: 3600s
+
+steps:
+  # ---------------------------------------------------------------------------
+  # Warm the layer cache. Cloud Build starts on a clean VM every time, so
+  # without this every run re-runs `yarn install` and a full turbo build.
+  # ---------------------------------------------------------------------------
+  - id: pull-cache
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eo pipefail
+        AR="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}"
+        for image in plunk-deps plunk-prod-deps plunk-builder; do
+          # First ever build has no cache; that is not a failure.
+          docker pull "$$AR/$$image:cache" || echo "no cache yet for $$image"
+        done
+
+  # ---------------------------------------------------------------------------
+  # Base stages from the root Dockerfile.
+  #
+  # Each is cached separately on purpose: inline cache only carries the layers
+  # of the stage actually being tagged, so caching `builder` alone would still
+  # re-run the dependency install in `deps` on every build.
+  # ---------------------------------------------------------------------------
+  - id: build-deps
+    name: gcr.io/cloud-builders/docker
+    waitFor: ['pull-cache']
+    args:
+      - build
+      - --target=deps
+      - --build-arg=BUILDKIT_INLINE_CACHE=1
+      - --cache-from=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-deps:cache
+      - -t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-deps:cache
+      - -f=Dockerfile
+      - .
+
+  - id: build-prod-deps
+    name: gcr.io/cloud-builders/docker
+    waitFor: ['build-deps']
+    args:
+      - build
+      - --target=prod-deps
+      - --build-arg=BUILDKIT_INLINE_CACHE=1
+      - --cache-from=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-deps:cache
+      - --cache-from=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-prod-deps:cache
+      - -t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-prod-deps:cache
+      # The bare tag Dockerfile.services resolves against.
+      - -t=plunk-prod-deps:${_TAG}
+      - -f=Dockerfile
+      - .
+
+  # NOTE: no *_URI build args. The web bundle is compiled with the public
+  # placeholder URLs and docker/web-entrypoint.sh rewrites them at startup;
+  # passing real URLs here bakes them in and leaves the rewrite nothing to match.
+  - id: build-builder
+    name: gcr.io/cloud-builders/docker
+    waitFor: ['build-deps']
+    args:
+      - build
+      - --target=builder
+      - --build-arg=BUILDKIT_INLINE_CACHE=1
+      - --cache-from=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-deps:cache
+      - --cache-from=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-builder:cache
+      - -t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-builder:cache
+      - -t=plunk-builder:${_TAG}
+      - -f=Dockerfile
+      - .
+
+  # ---------------------------------------------------------------------------
+  # Service images. Thin COPY-only stages over the bases above, so these are
+  # fast and run in parallel.
+  # ---------------------------------------------------------------------------
+  - id: build-api
+    name: gcr.io/cloud-builders/docker
+    waitFor: ['build-builder', 'build-prod-deps']
+    args:
+      - build
+      - --target=api-runner
+      - --build-arg=PLUNK_VERSION=${_TAG}
+      - -t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-api:${_TAG}
+      - -f=Dockerfile.services
+      - .
+
+  - id: build-worker
+    name: gcr.io/cloud-builders/docker
+    waitFor: ['build-builder', 'build-prod-deps']
+    args:
+      - build
+      - --target=worker-runner
+      - --build-arg=PLUNK_VERSION=${_TAG}
+      - -t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-worker:${_TAG}
+      - -f=Dockerfile.services
+      - .
+
+  - id: build-web
+    name: gcr.io/cloud-builders/docker
+    waitFor: ['build-builder', 'build-prod-deps']
+    args:
+      - build
+      - --target=web-runner
+      - --build-arg=PLUNK_VERSION=${_TAG}
+      - -t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-web:${_TAG}
+      - -f=Dockerfile.services
+      - .
+
+  # ---------------------------------------------------------------------------
+  # Push. Deliberately not the top-level `images:` field for the service images:
+  # that pushes only after every step finishes, which would leave the deploy
+  # steps below pointing at a tag that does not exist yet.
+  # ---------------------------------------------------------------------------
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    waitFor: ['build-api', 'build-worker', 'build-web']
+    args:
+      - -c
+      - |
+        set -eo pipefail
+        AR="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}"
+        for image in plunk-api plunk-worker plunk-web; do
+          docker push "$$AR/$$image:${_TAG}"
+        done
+
+  # ---------------------------------------------------------------------------
+  # Migrations, via the existing Cloud Run Job. Runs before any workload is
+  # deployed so new code never meets an old schema.
+  # ---------------------------------------------------------------------------
+  - id: migrate
+    name: ${_CLOUD_SDK_IMAGE}
+    entrypoint: bash
+    waitFor: ['push']
+    args:
+      - -c
+      - |
+        set -eo pipefail
+        if [[ -z "${_MIGRATE_JOB}" || "${_RUN_MIGRATIONS}" != "true" ]]; then
+          echo "Migrations skipped (job='${_MIGRATE_JOB}' run='${_RUN_MIGRATIONS}')."
+          exit 0
+        fi
+        AR="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}"
+        echo "Pointing job ${_MIGRATE_JOB} at plunk-api:${_TAG}"
+        gcloud run jobs update "${_MIGRATE_JOB}" \
+          --region="${_REGION}" \
+          --image="$$AR/plunk-api:${_TAG}"
+        gcloud run jobs execute "${_MIGRATE_JOB}" --region="${_REGION}" --wait
+
+  # ---------------------------------------------------------------------------
+  # Deploy. Each step is a no-op unless its name appears in _TARGETS.
+  # ---------------------------------------------------------------------------
+  - id: deploy-api
+    name: ${_CLOUD_SDK_IMAGE}
+    entrypoint: bash
+    waitFor: ['migrate']
+    args:
+      - -c
+      - |
+        set -eo pipefail
+        case ",${_TARGETS}," in *,api,*) ;; *) echo "api not in targets, skipping"; exit 0 ;; esac
+
+        # `if` rather than `[[ … ]] && …`: under `set -e` a false test as the
+        # last statement would exit the step.
+        FLAGS=()
+        if [[ -n "${_RUNTIME_SA}" ]]; then FLAGS+=("--service-account=${_RUNTIME_SA}"); fi
+        if [[ -n "${_API_SECRETS}" ]]; then FLAGS+=("--set-secrets=${_API_SECRETS}"); fi
+        if [[ -n "${_VPC_CONNECTOR}" ]]; then FLAGS+=("--vpc-connector=${_VPC_CONNECTOR}"); fi
+        if [[ -n "${_CLOUDSQL_INSTANCES}" ]]; then FLAGS+=("--add-cloudsql-instances=${_CLOUDSQL_INSTANCES}"); fi
+
+        # --min-instances=1 and always-on CPU are not optional here: apps/api
+        # runs cron in-process (workflow processor, domain verification), and a
+        # scale-to-zero, CPU-throttled revision simply never fires them.
+        gcloud run deploy "${_API_SERVICE}" \
+          --region="${_REGION}" \
+          --image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-api:${_TAG}" \
+          --env-vars-file=deploy/env/api.yaml \
+          --allow-unauthenticated \
+          --port=8080 \
+          --cpu=1 \
+          --memory=1Gi \
+          --min-instances=1 \
+          --max-instances=10 \
+          --no-cpu-throttling \
+          "$${FLAGS[@]}"
+
+  - id: deploy-worker
+    name: ${_CLOUD_SDK_IMAGE}
+    entrypoint: bash
+    waitFor: ['migrate']
+    args:
+      - -c
+      - |
+        set -eo pipefail
+        case ",${_TARGETS}," in *,worker,*) ;; *) echo "worker not in targets, skipping"; exit 0 ;; esac
+
+        FLAGS=()
+        if [[ -n "${_RUNTIME_SA}" ]]; then FLAGS+=("--service-account=${_RUNTIME_SA}"); fi
+        if [[ -n "${_WORKER_SECRETS}" ]]; then FLAGS+=("--set-secrets=${_WORKER_SECRETS}"); fi
+        if [[ -n "${_VPC_CONNECTOR}" ]]; then FLAGS+=("--vpc-connector=${_VPC_CONNECTOR}"); fi
+        if [[ -n "${_CLOUDSQL_INSTANCES}" ]]; then FLAGS+=("--add-cloudsql-instances=${_CLOUDSQL_INSTANCES}"); fi
+
+        # A worker pool, not a service: the worker consumes BullMQ queues and
+        # serves no requests. Pools have no port, no ingress and no traffic
+        # split, and CPU is always allocated — which is exactly the shape of a
+        # queue consumer. `--instances` selects manual scaling; set it to 0 to
+        # pause queue processing without deleting anything.
+        gcloud run worker-pools deploy "${_WORKER_POOL}" \
+          --region="${_REGION}" \
+          --image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-worker:${_TAG}" \
+          --env-vars-file=deploy/env/worker.yaml \
+          --instances="${_WORKER_INSTANCES}" \
+          --cpu=1 \
+          --memory=1Gi \
+          "$${FLAGS[@]}"
+
+  - id: deploy-web
+    name: ${_CLOUD_SDK_IMAGE}
+    entrypoint: bash
+    waitFor: ['migrate']
+    args:
+      - -c
+      - |
+        set -eo pipefail
+        case ",${_TARGETS}," in *,web,*) ;; *) echo "web not in targets, skipping"; exit 0 ;; esac
+
+        FLAGS=()
+        if [[ -n "${_RUNTIME_SA}" ]]; then FLAGS+=("--service-account=${_RUNTIME_SA}"); fi
+
+        # Pure frontend: no database, Redis or S3 credentials, so no secrets and
+        # no VPC egress. Safe to scale to zero.
+        gcloud run deploy "${_WEB_SERVICE}" \
+          --region="${_REGION}" \
+          --image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-web:${_TAG}" \
+          --env-vars-file=deploy/env/web.yaml \
+          --allow-unauthenticated \
+          --port=8080 \
+          --cpu=1 \
+          --memory=512Mi \
+          --min-instances=0 \
+          --max-instances=10 \
+          "$${FLAGS[@]}"
+
+# Cache images are pushed at the very end: they are an optimisation for the next
+# build, and nothing in this build depends on them landing.
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-deps:cache
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-prod-deps:cache
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/plunk-builder:cache

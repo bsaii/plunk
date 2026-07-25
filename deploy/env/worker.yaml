@@ -1,0 +1,23 @@
+# Literal environment for the plunk-worker Cloud Run worker pool.
+#
+# The worker imports the same apps/api/src/app/constants.ts as the API, so it
+# needs the same required variables even though it serves no HTTP traffic —
+# a missing one throws at import and the instance never starts.
+#
+# Keep the *_URI values identical to deploy/env/api.yaml: the worker renders
+# emails containing links back to the dashboard.
+
+NODE_ENV: production
+
+API_URI: https://api.example.com
+DASHBOARD_URI: https://app.example.com
+LANDING_URI: https://www.example.com
+WIKI_URI: https://docs.example.com
+
+AWS_SES_REGION: eu-west-1
+SES_CONFIGURATION_SET: plunk-configuration-set
+SES_CONFIGURATION_SET_NO_TRACKING: plunk-configuration-set-no-tracking
+
+# Health endpoint for the pool's liveness probe. A worker pool has no ingress,
+# so this is reachable only by Cloud Run's own probes.
+WORKER_HEALTH_PORT: '8081'

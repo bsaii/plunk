@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Multi-stage Dockerfile for Plunk
 # Creates a single image containing all applications (API, Worker, Web, Landing, Wiki)
 # Use SERVICE environment variable to specify which service to run

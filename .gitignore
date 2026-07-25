@@ -3,6 +3,9 @@ node_modules
 .pnp
 .pnp.js
 
+# Local deploy configuration (names GCP resources for scripts/deploy.sh)
+deploy/config.env
+
 # Local env files
 .env
 .env.local

@@ -1,167 +1,149 @@
-# Deploying the web dashboard to Cloud Run
+# Deploying Plunk to Cloud Run
 
-Build, push and deploy the `web-runner` image from `Dockerfile.services` as its own Cloud Run
-service. The API and worker images from the same file follow the identical build/push flow — only
-the target, the service name and the environment differ.
+Plunk deploys as three Cloud Run workloads built from `Dockerfile` + `Dockerfile.services`:
 
-## Prerequisites
+| Workload | Cloud Run surface | Image          | Why                                                              |
+| -------- | ----------------- | -------------- | ---------------------------------------------------------------- |
+| `api`    | Service           | `plunk-api`    | Serves HTTP, and runs the workflow/domain-verification cron jobs. |
+| `worker` | **Worker pool**   | `plunk-worker` | Consumes BullMQ queues. Serves no requests.                       |
+| `web`    | Service           | `plunk-web`    | The Next.js dashboard.                                            |
 
-```bash
-export PROJECT_ID=your-gcp-project
-export REGION=europe-west1
-export REPO=plunk
-export PLUNK_VERSION=v0.12.0
-export IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/plunk-web:${PLUNK_VERSION}"
-
-gcloud config set project "$PROJECT_ID"
-
-# One-time: create the Artifact Registry repo and let Docker authenticate against it.
-gcloud artifacts repositories create "$REPO" \
-  --repository-format=docker \
-  --location="$REGION" \
-  --description="Plunk service images"
-
-gcloud auth configure-docker "${REGION}-docker.pkg.dev"
-```
-
-## 1. Build
-
-The service images build on top of two base stages from the root `Dockerfile`, so the dependency
-install and the monorepo compile happen once and are shared by the api, worker and web images.
-Build them first:
+Everything is driven by `cloudbuild.yaml`. You never build or push images locally.
 
 ```bash
-docker build --platform linux/amd64 --target builder \
-  -t "plunk-builder:${PLUNK_VERSION}" -f Dockerfile .
-
-docker build --platform linux/amd64 --target prod-deps \
-  -t "plunk-prod-deps:${PLUNK_VERSION}" -f Dockerfile .
+yarn deploy
 ```
 
-> **Do not pass `--build-arg API_URI=…` (or the other `*_URI` args) to the builder.** The web bundle
-> is compiled with the public placeholder URLs, and the startup entrypoint rewrites them from the
-> environment. Overriding the build args bakes your URLs in permanently and leaves the runtime
-> rewrite with nothing to match — which is what you want only if you deliberately prefer a
-> per-environment image.
+That uploads the working tree to Cloud Build, which builds all three images, pushes them to
+Artifact Registry tagged with the commit SHA, runs the migration Cloud Run Job, and rolls out
+the three workloads.
 
-Then the web image:
+## One-time setup
 
 ```bash
-docker build --platform linux/amd64 \
-  --build-arg "PLUNK_VERSION=${PLUNK_VERSION}" \
-  --target web-runner \
-  -t "$IMAGE" \
-  -f Dockerfile.services .
+cp deploy/config.example.env deploy/config.env
+$EDITOR deploy/config.env          # project, region, resource names, secret refs
+yarn deploy:setup                  # APIs, Artifact Registry, service accounts, secrets
 ```
 
-`--platform linux/amd64` matters: Cloud Run does not run arm64 images, so building on an Apple
-Silicon machine without it produces an image that fails to start.
+`yarn deploy:setup` is idempotent — re-run it after changing `deploy/config.env`. It prints the
+`gcloud secrets versions add` command for every secret that still has no value; instances crash on
+startup until those are filled, because `apps/api/src/app/constants.ts` throws on any missing
+required variable.
 
-Optional smoke test before pushing:
+Then review `deploy/env/{api,worker,web}.yaml` and set the four `*_URI` values to your real
+hostnames.
+
+## Everyday use
 
 ```bash
-docker run --rm -p 8080:8080 \
-  -e API_URI=https://plunk-api.example.com \
-  -e DASHBOARD_URI=http://localhost:8080 \
-  "$IMAGE"
-# → open http://localhost:8080
+yarn deploy                     # all three, with migrations
+yarn deploy --only web          # just the dashboard
+yarn deploy --only api,worker   # backend only
+yarn deploy --no-migrate        # skip the migration job
+yarn deploy --migrate-only      # run migrations, deploy nothing
+yarn deploy --dry-run           # print the gcloud invocation, change nothing
 ```
 
-## 2. Push
+The build source is your **working tree**, not `HEAD`. Uncommitted changes are deployed — usually
+what you want from a deploy command, but such builds are tagged `<sha>-dirty` so you can tell from
+the image tag that the running code is not in git.
+
+## Configuration model
+
+Three places, with a deliberate split:
+
+- **`deploy/config.env`** (gitignored) — names GCP resources. No values, only identifiers and
+  Secret Manager references.
+- **`deploy/env/*.yaml`** (committed) — the literal, non-secret environment for each workload.
+  Applied with `--env-vars-file`, which **replaces** the workload's full env on every deploy. That
+  is the point: this file is the source of truth, so a value someone edits in the console does not
+  survive the next deploy.
+- **Secret Manager** — everything credential-shaped, injected by reference via `--set-secrets`. The
+  values never pass through Cloud Build.
+
+`worker.yaml` repeats the `*_URI` values from `api.yaml` because the worker imports the same
+`constants.ts` and renders emails containing dashboard links. Keep them in sync.
+
+## Two things that fail silently
+
+**CORS.** The API's `DASHBOARD_URI` is its CORS allowlist entry. If it is not byte-identical to the
+origin the browser loads the dashboard from, every authenticated request is rejected and the
+dashboard looks broken rather than misconfigured.
+
+**Cookie domain.** The API derives the auth cookie's `Domain` from the last two labels of
+`API_URI`'s hostname. On default Cloud Run hostnames (`https://plunk-api-abc123-ew.a.run.app`) that
+produces `Domain=.run.app` — and because `run.app` is on the Public Suffix List, browsers silently
+drop the cookie. Login appears to succeed and the dashboard immediately behaves as logged out.
+
+Custom domains are therefore effectively required:
 
 ```bash
-docker push "$IMAGE"
+gcloud beta run domain-mappings create --service=plunk-web --domain=app.example.com --region="$REGION"
+gcloud beta run domain-mappings create --service=plunk-api --domain=api.example.com --region="$REGION"
 ```
 
-## 3. Deploy
+Then set `API_URI=https://api.example.com` and `DASHBOARD_URI=https://app.example.com` in **all**
+of `deploy/env/*.yaml` — the shared `.example.com` cookie domain is what makes the session work
+across the two services.
 
-The dashboard needs to know its own public URL, which Cloud Run only assigns on the first deploy.
-Deploy once, read the URL back, then set it:
+## Why the worker is a pool, not a service
+
+A Cloud Run *service* must bind `$PORT` or the revision is killed as "failed to start and listen",
+and its CPU is throttled between requests. The worker serves no requests — it consumes Redis
+queues — so as a service it would need a fake HTTP server and `--no-cpu-throttling` to behave.
+
+A worker pool is the surface built for this: no port, no ingress, no traffic split, and CPU always
+allocated. Scaling is manual via `--instances`, which also gives you a clean kill switch:
 
 ```bash
-gcloud run deploy plunk-web \
-  --image="$IMAGE" \
-  --region="$REGION" \
-  --platform=managed \
-  --allow-unauthenticated \
-  --port=8080 \
-  --cpu=1 \
-  --memory=512Mi \
-  --min-instances=0 \
-  --max-instances=10 \
-  --set-env-vars="API_URI=https://plunk-api.example.com,LANDING_URI=https://www.example.com,WIKI_URI=https://docs.example.com"
-
-DASHBOARD_URI=$(gcloud run services describe plunk-web \
-  --region="$REGION" --format='value(status.url)')
-
-gcloud run services update plunk-web \
-  --region="$REGION" \
-  --update-env-vars="DASHBOARD_URI=${DASHBOARD_URI}"
+gcloud run worker-pools update plunk-worker --region="$REGION" --instances=0   # pause queue processing
 ```
 
-Redeploying a new image later is just the build/push above plus:
+The worker still exposes `GET /health` on `WORKER_HEALTH_PORT` (default 8081). It reports `200` only
+when the queue connections are actually `ready` — a worker whose Redis is unreachable answers `503
+{"status":"disconnected"}` rather than claiming to be healthy, which is what makes it usable as a
+liveness probe.
+
+## Migrations
+
+`deploy/config.env`'s `MIGRATE_JOB` names an existing Cloud Run Job. Each deploy repoints it at the
+new `plunk-api` image and executes it with `--wait` **before** any workload is rolled out, so new
+code never meets an old schema. A failed migration fails the build and nothing is deployed.
+
+Set `MIGRATE_JOB=` to take migrations out of the pipeline entirely.
+
+## Rollback
+
+Services roll back by traffic; the worker pool rolls back by image.
 
 ```bash
-gcloud run deploy plunk-web --image="$IMAGE" --region="$REGION"
+gcloud run revisions list --service=plunk-api --region="$REGION"
+gcloud run services update-traffic plunk-api --region="$REGION" --to-revisions=plunk-api-00042-abc=100
+
+gcloud run worker-pools update plunk-worker --region="$REGION" \
+  --image="${REGION}-docker.pkg.dev/${PROJECT_ID}/plunk/plunk-worker:<previous-tag>"
 ```
 
-Environment variables set on the service are preserved across deploys — you only re-pass
-`--set-env-vars` when a value changes.
+Because every image is tagged with its commit SHA, `<previous-tag>` is just the previous commit.
 
-## Environment variables
+## Build performance
 
-The dashboard is a pure frontend: it holds no database, Redis or S3 credentials, and talks to the
-API over HTTP. Everything it needs is the four URLs.
+Cloud Build starts on a clean VM, so the pipeline pushes three cache images (`plunk-deps`,
+`plunk-prod-deps`, `plunk-builder`) tagged `:cache` and restores them with `--cache-from` on the
+next run. They are cached separately on purpose — inline cache only carries the layers of the stage
+being tagged, so caching `builder` alone would still re-run `yarn install` every time.
 
-| Variable        | Required | Default (if unset)      | Description                                                                 |
-| --------------- | -------- | ----------------------- | --------------------------------------------------------------------------- |
-| `API_URI`       | Yes      | `http://localhost:8080` | Public URL of the Plunk API service. Every dashboard request goes here.      |
-| `DASHBOARD_URI` | Yes      | `http://localhost:3000` | This service's own public URL. Used for absolute links, sitemap and OAuth returns. |
-| `LANDING_URI`   | No       | `https://www.useplunk.com` | Marketing site URL. Only used for outbound links; leave unset if not self-hosting it. |
-| `WIKI_URI`      | No       | `https://docs.useplunk.com` | Docs site URL, used by in-app help links.                                 |
-| `PORT`          | No       | `8080`                  | Injected by Cloud Run; the entrypoint honours it. Do not set it manually.    |
-| `NODE_ENV`      | No       | `production`            | Already set in the image.                                                    |
+A cold build compiles the whole monorepo and takes a while; a warm build with unchanged
+dependencies is substantially shorter. The `builder` stage still compiles all five apps (including
+`smtp`, `landing` and `wiki`, which produce no image here) — layer caching keeps that cheap when
+those apps have not changed.
 
-All four `*_URI` values must include the scheme and no trailing slash (`https://app.example.com`).
-The entrypoint mirrors them onto the matching `NEXT_PUBLIC_*` names, so there is no need to set both.
+Note that `--platform linux/amd64` is no longer your problem: Cloud Build workers are amd64, so
+there is no cross-architecture build to forget about on an Apple Silicon machine.
 
-### These values must line up with the API service
+## Automatic deploys
 
-Two settings on the **API** service are checked against the dashboard's origin, and a mismatch fails
-in ways that look like a broken dashboard rather than a misconfiguration:
-
-- The API's `DASHBOARD_URI` is its CORS allowlist entry. If it is not byte-identical to the URL the
-  browser loads the dashboard from, every authenticated request is rejected by CORS.
-- The API's `API_URI` decides the auth cookie's `Secure`/`SameSite` flags and its `Domain`.
-
-### Custom domains are effectively required
-
-The API derives the auth cookie domain from the last two labels of `API_URI`'s hostname. On the
-default Cloud Run hostnames (`https://plunk-api-abc123-ew.a.run.app`) that produces `Domain=.run.app`
-— and because `run.app` is on the Public Suffix List, browsers silently drop the cookie. Login then
-appears to succeed and the dashboard immediately behaves as logged out.
-
-Map both services onto subdomains of a domain you control before using it for real:
-
-```bash
-gcloud beta run domain-mappings create --service=plunk-web \
-  --domain=app.example.com --region="$REGION"
-
-gcloud beta run domain-mappings create --service=plunk-api \
-  --domain=api.example.com --region="$REGION"
-```
-
-Then set `API_URI=https://api.example.com` and `DASHBOARD_URI=https://app.example.com` on **both**
-services (the shared `.example.com` cookie domain is what makes the session work across the two).
-
-## Scaling notes
-
-- **`--min-instances=0`** is fine for internal dashboards, at the cost of a cold start (a few
-  seconds) on the first request. Use `--min-instances=1` if that matters.
-- **`--memory=512Mi`** is enough for the Next.js server. The startup URL rewrite edits files on the
-  container's in-memory filesystem, which counts against the memory limit, but it touches only the
-  handful of built files listed in the URL manifest.
-- **`--allow-unauthenticated`** is required for a public dashboard — Plunk does its own JWT auth.
-  Drop it only if you put IAP or another proxy in front.
-- The dashboard is stateless, so `--max-instances` can be raised freely; the API and database are
-  the scaling constraint, not this service.
+`yarn deploy:trigger` wires a Cloud Build GitHub trigger that runs this same `cloudbuild.yaml` on
+push. See [ci-cd-github.md](./ci-cd-github.md) for how that compares with the deploy-key workflow it
+replaces.
