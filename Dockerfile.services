@@ -24,6 +24,14 @@
 #
 #   docker run --rm --env-file .env plunk-api:${PLUNK_VERSION} \
 #     node_modules/.bin/prisma migrate deploy --schema=packages/db/prisma/schema.prisma
+#
+# The web image compiles the *_URI values into the Next.js bundle as the public
+# placeholder URLs and rewrites them from the environment at startup, so the same
+# image is deployable anywhere without a rebuild. That only works if the base
+# `builder` image was built with the default URL build args — overriding them
+# bakes the values in permanently and leaves nothing for startup to rewrite.
+#
+# See docs/deploy-cloud-run.md for the Cloud Run build/push/deploy commands.
 # =============================================================================
 
 ARG PLUNK_VERSION=v0.12.0
@@ -96,7 +104,34 @@ CMD ["node", "apps/api/dist/jobs/worker.js"]
 # =============================================================================
 FROM node:20-alpine AS web-runner
 WORKDIR /app
-COPY --from=builder /app/apps/web/.next/standalone ./
-EXPOSE 3000
-ENV PORT=3000 HOSTNAME=0.0.0.0
-CMD ["node", "apps/web/.next/standalone/apps/web/server.js"]
+
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 plunk
+
+# --- Standalone server bundle -------------------------------------------------
+# The standalone output is its own self-contained tree (server.js, the traced
+# node_modules and the server-side .next files), rooted at /app. The web app
+# therefore lives at /app/apps/web, NOT /app/apps/web/.next/standalone/apps/web.
+COPY --from=builder --chown=plunk:nodejs /app/apps/web/.next/standalone ./
+
+# --- Assets the standalone output does not include ----------------------------
+# Next.js deliberately leaves these out; without them every hashed JS/CSS chunk
+# and every image/font 404s and the dashboard renders unstyled and broken.
+COPY --from=builder --chown=plunk:nodejs /app/apps/web/.next/static ./apps/web/.next/static
+COPY --from=builder --chown=plunk:nodejs /app/apps/web/public ./apps/web/public
+
+# --- Runtime URL replacement --------------------------------------------------
+# Manifests list (relative to the app root) the built files containing the
+# placeholder URLs, so startup rewrites only those instead of scanning the tree.
+COPY --from=builder --chown=plunk:nodejs /app/apps/web/.next/url-manifest.txt ./apps/web/.next/url-manifest.txt
+COPY --from=builder --chown=plunk:nodejs /app/apps/web/.next/sitemap-manifest.txt ./apps/web/.next/sitemap-manifest.txt
+COPY --chown=plunk:nodejs docker/replace-urls-optimized.sh docker/web-entrypoint.sh /app/docker/
+RUN chmod +x /app/docker/replace-urls-optimized.sh /app/docker/web-entrypoint.sh
+
+USER plunk
+
+ENV NODE_ENV=production
+# Cloud Run injects $PORT (8080 by default); the entrypoint honours it.
+ENV PORT=8080 HOSTNAME=0.0.0.0
+EXPOSE 8080
+ENTRYPOINT ["/app/docker/web-entrypoint.sh"]
