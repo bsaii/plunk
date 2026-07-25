@@ -9,19 +9,24 @@ the target, the service name and the environment differ.
 ```bash
 export PROJECT_ID=your-gcp-project
 export REGION=europe-west1
-export REPO=plunk
+export REPO=web          # existing Artifact Registry repository
 export PLUNK_VERSION=v0.12.0
 export IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/plunk-web:${PLUNK_VERSION}"
 
 gcloud config set project "$PROJECT_ID"
 
-# One-time: create the Artifact Registry repo and let Docker authenticate against it.
+# Let Docker authenticate against the registry (once per machine; Cloud Shell
+# resets this when the VM is recycled, so re-run it if a push returns 401/403).
+gcloud auth configure-docker "${REGION}-docker.pkg.dev"
+```
+
+If the repository does not exist yet:
+
+```bash
 gcloud artifacts repositories create "$REPO" \
   --repository-format=docker \
   --location="$REGION" \
   --description="Plunk service images"
-
-gcloud auth configure-docker "${REGION}-docker.pkg.dev"
 ```
 
 ## 1. Build
@@ -48,6 +53,7 @@ Then the web image:
 
 ```bash
 docker build --platform linux/amd64 \
+  --provenance=false --sbom=false \
   --build-arg "PLUNK_VERSION=${PLUNK_VERSION}" \
   --target web-runner \
   -t "$IMAGE" \
@@ -55,25 +61,50 @@ docker build --platform linux/amd64 \
 ```
 
 `--platform linux/amd64` matters: Cloud Run does not run arm64 images, so building on an Apple
-Silicon machine without it produces an image that fails to start.
+Silicon machine without it produces an image that fails to start. It is a no-op in Cloud Shell,
+which is already amd64.
 
-Optional smoke test before pushing:
+`--provenance=false --sbom=false` suppresses the SLSA provenance and SBOM attestations BuildKit
+attaches by default when pushing. Without them the push produces an OCI image *index* with extra
+`unknown/unknown` manifest entries — visible as extra untagged entries in Artifact Registry, and a
+source of `Container manifest type ... must support amd64/linux` errors on deploy. If your Docker
+rejects the flags, use `docker buildx build`, or set `BUILDX_NO_DEFAULT_ATTESTATIONS=1` once.
+
+### Building in Cloud Shell
+
+The Cloud Shell VM is an `e2-small` (2 GB RAM) with a modest boot disk, and this build installs the
+whole monorepo's dependencies and runs three Next.js builds. It can work, but `next build` is
+memory-hungry — if you hit an OOM kill (exit code 137) or `no space left on device`, reclaim room
+with `docker system prune -af` and retry, and if it still fails, build on a machine with more
+headroom or move the build to Cloud Build with a larger machine type
+(`gcloud builds submit --machine-type=e2-highcpu-8`), which needs a `cloudbuild.yaml` describing the
+same three build steps.
+
+## 2. Smoke test before pushing
 
 ```bash
-docker run --rm -p 8080:8080 \
-  -e API_URI=https://plunk-api.example.com \
-  -e DASHBOARD_URI=http://localhost:8080 \
-  "$IMAGE"
-# → open http://localhost:8080
+scripts/smoke-test-web-image.sh "$IMAGE"
 ```
 
-## 2. Push
+This starts the container the way Cloud Run will — non-default `$PORT`, 512Mi, no `HOSTNAME`
+override — and checks the failure modes that leave a container *running* but the dashboard broken:
+missing `.next/static` or `public` assets, a bind address the container does not own, and a
+placeholder API URL that never got rewritten. Exits non-zero and dumps the container log on failure.
+
+## 3. Push
 
 ```bash
 docker push "$IMAGE"
 ```
 
-## 3. Deploy
+Confirm what actually landed — with the attestation flags above this lists exactly one entry:
+
+```bash
+gcloud artifacts docker images list \
+  "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}" --include-tags
+```
+
+## 4. Deploy
 
 The dashboard needs to know its own public URL, which Cloud Run only assigns on the first deploy.
 Deploy once, read the URL back, then set it:
