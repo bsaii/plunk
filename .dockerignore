@@ -61,6 +61,7 @@ vitest.config.ts
 # Documentation (not needed in image)
 *.md
 !README.md
+docs
 
 # Docker
 Dockerfile*
