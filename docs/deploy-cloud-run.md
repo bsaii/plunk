@@ -10,8 +10,13 @@ the target, the service name and the environment differ.
 export PROJECT_ID=your-gcp-project
 export REGION=europe-west1
 export REPO=web          # existing Artifact Registry repository
-export PLUNK_VERSION=v0.12.0
-export IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/plunk-web:${PLUNK_VERSION}"
+
+# Tag by commit, so a tag in the registry always identifies the code it was built from.
+export GIT_SHA=$(git rev-parse --short HEAD)
+export IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/plunk-web:${GIT_SHA}"
+
+# A dirty tree makes the tag lie about what is in the image — commit or stash first.
+git status --porcelain | grep -q . && echo "⚠️  uncommitted changes, ${GIT_SHA} will be inaccurate"
 
 gcloud config set project "$PROJECT_ID"
 
@@ -36,12 +41,17 @@ install and the monorepo compile happen once and are shared by the api, worker a
 Build them first:
 
 ```bash
-docker build --platform linux/amd64 --target builder \
-  -t "plunk-builder:${PLUNK_VERSION}" -f Dockerfile .
+docker build --target builder \
+  -t "plunk-builder:${GIT_SHA}" -f Dockerfile .
 
-docker build --platform linux/amd64 --target prod-deps \
-  -t "plunk-prod-deps:${PLUNK_VERSION}" -f Dockerfile .
+docker build --target prod-deps \
+  -t "plunk-prod-deps:${GIT_SHA}" -f Dockerfile .
 ```
+
+Tagging the base images by commit too is what makes a stale build fail loudly. `Dockerfile.services`
+selects its base images by tag, so if you skip these two steps and build only the web image, it
+silently uses whatever base images are already on the machine — i.e. an earlier commit's code, in an
+image tagged with the current commit. With commit tags the build errors out instead.
 
 > **Do not pass `--build-arg API_URI=…` (or the other `*_URI` args) to the builder.** The web bundle
 > is compiled with the public placeholder URLs, and the startup entrypoint rewrites them from the
@@ -52,17 +62,24 @@ docker build --platform linux/amd64 --target prod-deps \
 Then the web image:
 
 ```bash
-docker build --platform linux/amd64 \
+docker build \
   --provenance=false --sbom=false \
-  --build-arg "PLUNK_VERSION=${PLUNK_VERSION}" \
+  --build-arg "PLUNK_VERSION=${GIT_SHA}" \
+  --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
   --target web-runner \
   -t "$IMAGE" \
   -f Dockerfile.services .
 ```
 
-`--platform linux/amd64` matters: Cloud Run does not run arm64 images, so building on an Apple
-Silicon machine without it produces an image that fails to start. It is a no-op in Cloud Shell,
-which is already amd64.
+`PLUNK_VERSION` is the *base image tag selector*, not a release version — it has to match whatever
+you tagged the two base images with above.
+
+The `org.opencontainers.image.revision` label records the full commit inside the image, so
+`docker image inspect` answers "which commit is this?" even if the tag is later moved or lost.
+
+Add `--platform linux/amd64` to all three builds when building from an Apple Silicon machine: Cloud
+Run does not run arm64 images, and without it the push produces an image that fails to start. It is
+unnecessary in Cloud Shell, which is already amd64.
 
 `--provenance=false --sbom=false` suppresses the SLSA provenance and SBOM attestations BuildKit
 attaches by default when pushing. Without them the push produces an OCI image *index* with extra
@@ -80,16 +97,46 @@ headroom or move the build to Cloud Build with a larger machine type
 (`gcloud builds submit --machine-type=e2-highcpu-8`), which needs a `cloudbuild.yaml` describing the
 same three build steps.
 
-## 2. Smoke test before pushing
+## 2. Test before pushing
+
+Run the container the way Cloud Run will — a non-default `$PORT`, a 512Mi limit, and no `HOSTNAME`
+override, so the runtime-injected container-ID hostname exercises the bind path:
 
 ```bash
-scripts/smoke-test-web-image.sh "$IMAGE"
+docker run -d --name plunk-web-test --memory 512m --cpus 1 \
+  -p 8099:8099 -e PORT=8099 \
+  -e API_URI=https://smoke-api.plunk-test.invalid \
+  -e DASHBOARD_URI=http://localhost:8099 \
+  "$IMAGE"
+
+sleep 10
+
+curl -sS -o /dev/null -w 'root:    %{http_code}\n' http://localhost:8099/
+curl -sS -o /dev/null -w 'login:   %{http_code}\n' http://localhost:8099/auth/login
+curl -sS -o /dev/null -w 'favicon: %{http_code}\n' http://localhost:8099/favicon.ico
+
+CHUNK=$(curl -s http://localhost:8099/ | grep -o '/_next/static/[^"]*\.js' | head -1)
+curl -sS -o /dev/null -w "chunk:   %{http_code}  ${CHUNK}\n" "http://localhost:8099${CHUNK}"
+
+docker exec plunk-web-test grep -rl 'next-api.useplunk.com' /app/apps/web/.next \
+  || echo 'rewrite: clean (no placeholder URLs left)'
+
+docker logs plunk-web-test | tail -5
+docker rm -f plunk-web-test
 ```
 
-This starts the container the way Cloud Run will — non-default `$PORT`, 512Mi, no `HOSTNAME`
-override — and checks the failure modes that leave a container *running* but the dashboard broken:
-missing `.next/static` or `public` assets, a bind address the container does not own, and a
-placeholder API URL that never got rewritten. Exits non-zero and dumps the container log on failure.
+All four status codes must be `200`. Each one rules out a specific way this image can be *running*
+but broken:
+
+- `root` / `login` — the server came up and is bound to an address the container actually owns
+  (published ports forward to the container IP, so a localhost-only bind fails here, exactly as it
+  would on Cloud Run)
+- `favicon` — `public/` made it into the image
+- `chunk` — `.next/static` made it in; a 404 here is the "dashboard renders unstyled" failure
+- `rewrite: clean` — the entrypoint replaced the compile-time placeholder URLs
+
+The container log should end with `✅ URL replacement complete for web` followed by the Next.js
+startup banner.
 
 ## 3. Push
 
@@ -97,7 +144,8 @@ placeholder API URL that never got rewritten. Exits non-zero and dumps the conta
 docker push "$IMAGE"
 ```
 
-Confirm what actually landed — with the attestation flags above this lists exactly one entry:
+Confirm what landed. Each build should appear as exactly one entry tagged with its commit — with the
+attestation flags above there are no extra untagged `unknown/unknown` manifests alongside it:
 
 ```bash
 gcloud artifacts docker images list \
@@ -130,7 +178,8 @@ gcloud run services update plunk-web \
   --update-env-vars="DASHBOARD_URI=${DASHBOARD_URI}"
 ```
 
-Redeploying a new image later is just the build/push above plus:
+Redeploying a new commit later is the build/push above (with `GIT_SHA` re-read from the new HEAD)
+plus:
 
 ```bash
 gcloud run deploy plunk-web --image="$IMAGE" --region="$REGION"
@@ -138,6 +187,10 @@ gcloud run deploy plunk-web --image="$IMAGE" --region="$REGION"
 
 Environment variables set on the service are preserved across deploys — you only re-pass
 `--set-env-vars` when a value changes.
+
+Because every image carries its commit in the tag, `gcloud run services describe plunk-web
+--region="$REGION" --format='value(spec.template.spec.containers[0].image)'` tells you exactly which
+commit is live, and rolling back is a deploy of an earlier commit's tag.
 
 ## Environment variables
 

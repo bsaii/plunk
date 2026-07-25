@@ -7,22 +7,29 @@
 #
 # They build on top of two base images taken straight from the main Dockerfile's
 # `builder` and `prod-deps` stages, so the heavy dependency install + compile
-# only happens once:
+# only happens once. Tag everything with the commit being built, so an image tag
+# always identifies the code inside it:
 #
-#   docker build --target builder   -t plunk-builder:${PLUNK_VERSION}   -f Dockerfile .
-#   docker build --target prod-deps -t plunk-prod-deps:${PLUNK_VERSION} -f Dockerfile .
+#   TAG=$(git rev-parse --short HEAD)
 #
-# Then build the individual service images:
+#   docker build --target builder   -t plunk-builder:${TAG}   -f Dockerfile .
+#   docker build --target prod-deps -t plunk-prod-deps:${TAG} -f Dockerfile .
 #
-#   docker build --target api-runner    -t plunk-api:${PLUNK_VERSION}    -f Dockerfile.services .
-#   docker build --target worker-runner -t plunk-worker:${PLUNK_VERSION} -f Dockerfile.services .
-#   docker build --target web-runner    -t plunk-web:${PLUNK_VERSION}    -f Dockerfile.services .
+# Then build the individual service images, pointing PLUNK_VERSION at those bases:
+#
+#   docker build --build-arg PLUNK_VERSION=${TAG} --target api-runner    -t plunk-api:${TAG}    -f Dockerfile.services .
+#   docker build --build-arg PLUNK_VERSION=${TAG} --target worker-runner -t plunk-worker:${TAG} -f Dockerfile.services .
+#   docker build --build-arg PLUNK_VERSION=${TAG} --target web-runner    -t plunk-web:${TAG}    -f Dockerfile.services .
+#
+# PLUNK_VERSION selects the base image tag and has no default on purpose: a
+# default lets a build that skipped the two base builds silently pick up a stale
+# base image, producing an image tagged with one commit but built from another.
 #
 # The API/worker read all configuration (including the *_URI values) from the
 # environment at runtime. Database migrations are not run automatically; run
 # them once on deploy with the API image, e.g.:
 #
-#   docker run --rm --env-file .env plunk-api:${PLUNK_VERSION} \
+#   docker run --rm --env-file .env plunk-api:${TAG} \
 #     node_modules/.bin/prisma migrate deploy --schema=packages/db/prisma/schema.prisma
 #
 # The web image compiles the *_URI values into the Next.js bundle as the public
@@ -34,7 +41,7 @@
 # See docs/deploy-cloud-run.md for the Cloud Run build/push/deploy commands.
 # =============================================================================
 
-ARG PLUNK_VERSION=v0.12.0
+ARG PLUNK_VERSION
 
 FROM plunk-builder:${PLUNK_VERSION} AS builder
 FROM plunk-prod-deps:${PLUNK_VERSION} AS prod-deps
