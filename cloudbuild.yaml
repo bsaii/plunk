@@ -1,0 +1,195 @@
+# =============================================================================
+# Cloud Build pipeline: api + web
+# =============================================================================
+# Builds the "api" and "web" service images (see Dockerfile.services) on
+# Google's build infrastructure instead of your local machine, pushes them to
+# Artifact Registry, then rolls each Cloud Run service over to the new image.
+#
+# Why Cloud Build instead of `docker build` in Cloud Shell: Cloud Shell's VM
+# has a small local disk, and this monorepo's build (installing dependencies
+# for every app + compiling api/wiki/web/landing) is big enough to fill it.
+# Cloud Build runs the exact same `docker build` commands on a separate,
+# much bigger machine, so nothing is built on your Cloud Shell disk at all.
+#
+# -----------------------------------------------------------------------------
+# PREREQUISITES (one-time, do these yourself before the first run — this file
+# deliberately does NOT create any of them, so it can never create a second
+# copy of something you already made in the console):
+#
+#   1. An Artifact Registry Docker repo — check first:
+#        gcloud artifacts repositories describe REPO_NAME --location=REGION
+#      If it doesn't exist yet:
+#        gcloud artifacts repositories create REPO_NAME \
+#          --repository-format=docker --location=REGION
+#
+#   2. The Cloud Run services themselves, "plunk-api" and "plunk-web" (or
+#      whatever you already named them in the console) — check first:
+#        gcloud run services list --region=REGION
+#      A Cloud Run service must exist before `gcloud run deploy --image=...`
+#      (below) can update it — this file only ever *updates* the image on an
+#      existing service, it never runs the interactive first-time deploy
+#      (that needs flags like --allow-unauthenticated that only make sense
+#      once, and Cloud Build steps have no terminal to prompt you on).
+#      First deploy is a one-off, from your terminal — see
+#      docs/deploy-cloud-run.md for the web service's first-deploy command;
+#      the api service's is the same shape, swapping in its own env vars.
+#
+#   3. Cloud Build's service account needs permission to push images and
+#      deploy to Cloud Run. Grant these once (replace PROJECT_NUMBER — find
+#      it with `gcloud projects describe $(gcloud config get-value project)
+#      --format='value(projectNumber)'`):
+#
+#        PROJECT_NUMBER=<your project number>
+#        CB_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
+#
+#        gcloud projects add-iam-policy-binding $(gcloud config get-value project) \
+#          --member="serviceAccount:${CB_SA}" --role="roles/artifactregistry.writer"
+#
+#        gcloud projects add-iam-policy-binding $(gcloud config get-value project) \
+#          --member="serviceAccount:${CB_SA}" --role="roles/run.admin"
+#
+#        gcloud projects add-iam-policy-binding $(gcloud config get-value project) \
+#          --member="serviceAccount:${CB_SA}" --role="roles/iam.serviceAccountUser"
+#
+# -----------------------------------------------------------------------------
+# HOW TO RUN IT (from Cloud Shell, in the repo root):
+#
+#   gcloud builds submit \
+#     --config=cloudbuild.yaml \
+#     --substitutions=_TAG=$(git rev-parse --short HEAD)
+#
+# _TAG is the only substitution you need to pass per run — it tags both
+# images with the commit they were built from. The rest (_REGION, _AR_REPO,
+# _API_SERVICE, _WEB_SERVICE below) describe *where things already live*, so
+# set those to match your console once, not per run. Either edit the
+# defaults below, or override any of them the same way as _TAG, e.g.:
+#
+#   gcloud builds submit --config=cloudbuild.yaml \
+#     --substitutions=_TAG=$(git rev-parse --short HEAD),_REGION=europe-west1
+# =============================================================================
+
+substitutions:
+  _REGION: us-central1 # <-- EDIT: region your Artifact Registry repo + Cloud Run services are in
+  _AR_REPO: plunk # <-- EDIT: Artifact Registry repository name
+  _API_SERVICE: plunk-api # <-- EDIT: Cloud Run service name for the API
+  _WEB_SERVICE: plunk-web # <-- EDIT: Cloud Run service name for the web dashboard
+  _TAG: latest # normally overridden per-run with the commit SHA (see above)
+
+# Cloud Build's default timeout is 10 minutes, which this build (installing
+# deps + compiling every app) does not fit in — 40 minutes gives it headroom.
+timeout: 2400s
+
+steps:
+  # ---------------------------------------------------------------------
+  # 1. Shared base stages, built once and reused by both service images.
+  #    `deps`/install + compiling every app in the monorepo happens here;
+  #    the api and web builds below just copy the already-built output out
+  #    of these two images instead of redoing it.
+  # ---------------------------------------------------------------------
+  - id: build-base
+    name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "build",
+        "--platform=linux/amd64",
+        "--target=builder",
+        "-t=plunk-builder:${_TAG}",
+        "-f=Dockerfile",
+        ".",
+      ]
+
+  - id: build-prod-deps
+    name: gcr.io/cloud-builders/docker
+    args:
+      [
+        "build",
+        "--platform=linux/amd64",
+        "--target=prod-deps",
+        "-t=plunk-prod-deps:${_TAG}",
+        "-f=Dockerfile",
+        ".",
+      ]
+
+  # ---------------------------------------------------------------------
+  # 2. API image: build, push, deploy. Runs in parallel with the web chain
+  #    below (both only wait on the two shared stages above).
+  # ---------------------------------------------------------------------
+  - id: build-api
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["build-base", "build-prod-deps"]
+    args:
+      [
+        "build",
+        "--platform=linux/amd64",
+        "--build-arg=PLUNK_VERSION=${_TAG}",
+        "--target=api-runner",
+        "-t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/api:${_TAG}",
+        "-f=Dockerfile.services",
+        ".",
+      ]
+
+  - id: push-api
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["build-api"]
+    args:
+      [
+        "push",
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/api:${_TAG}",
+      ]
+
+  - id: deploy-api
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    waitFor: ["push-api"]
+    args:
+      [
+        "run",
+        "deploy",
+        "${_API_SERVICE}",
+        "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/api:${_TAG}",
+        "--region=${_REGION}",
+      ]
+
+  # ---------------------------------------------------------------------
+  # 3. Web image: build, push, deploy.
+  # ---------------------------------------------------------------------
+  - id: build-web
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["build-base", "build-prod-deps"]
+    args:
+      [
+        "build",
+        "--platform=linux/amd64",
+        "--build-arg=PLUNK_VERSION=${_TAG}",
+        "--target=web-runner",
+        "-t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/web:${_TAG}",
+        "-f=Dockerfile.services",
+        ".",
+      ]
+
+  - id: push-web
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["build-web"]
+    args:
+      [
+        "push",
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/web:${_TAG}",
+      ]
+
+  - id: deploy-web
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    waitFor: ["push-web"]
+    args:
+      [
+        "run",
+        "deploy",
+        "${_WEB_SERVICE}",
+        "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/web:${_TAG}",
+        "--region=${_REGION}",
+      ]
+
+# Steps above already `docker push` explicitly (so the image exists in the
+# registry before the deploy step that needs it — the alternative, listing
+# images here under a top-level `images:` key, only pushes *after* every
+# step finishes, which would be too late for `deploy-api`/`deploy-web`).
