@@ -1,19 +1,31 @@
-# Building and deploying api + web with Cloud Build
+# Building and deploying api + web + worker with Cloud Build
 
-`cloudbuild.yaml` (repo root) builds the `api` and `web` images from `Dockerfile.services`,
-pushes them to Artifact Registry, updates the two Cloud Run services, and keeps the
-`plunk-migrate` Cloud Run Job pointed at the same api image — all on Google's build
-infrastructure. Use this instead of running `docker build` in Cloud Shell: the monorepo build
-(installing dependencies and compiling every app) is big enough to fill Cloud Shell's small
-local disk, and Cloud Build doesn't have that limit.
+`cloudbuild.yaml` (repo root) builds the `api`, `web` and `worker` images from
+`Dockerfile.services`, pushes them to Artifact Registry, updates the `plunk-api` and `plunk-web`
+Cloud Run services, keeps the `plunk-migrate` Cloud Run Job pointed at the same api image, and
+updates the `plunk-worker` Cloud Run Worker Pool — all on Google's build infrastructure. Use this
+instead of running `docker build` in Cloud Shell: the monorepo build (installing dependencies and
+compiling every app) is big enough to fill Cloud Shell's small local disk, and Cloud Build doesn't
+have that limit.
 
-Only `api` and `web` are wired up for now. `worker`, `landing` and `wiki` can be added the same
-way later — each is just another `build` → `push` → `deploy` step chain in the same file.
+`landing` and `wiki` aren't wired up yet — they're still only built as part of the all-in-one
+image (`Dockerfile`). Adding them later is the same shape: another `build` → `push` → `deploy`
+step chain in the same file.
 
 **BuildKit**: the root `Dockerfile` uses `--mount=type=cache` (a BuildKit-only feature) to cache
 the yarn/turbo/npm installs between builds. The `gcr.io/cloud-builders/docker` image Cloud Build
 runs doesn't turn BuildKit on by default, so every `docker build` step in `cloudbuild.yaml` sets
 `env: ["DOCKER_BUILDKIT=1"]` — without it, the build fails on the first cache-mounted line.
+
+**Why the worker is a Worker Pool, not a Cloud Run service**: `apps/api/src/jobs/worker.js` is a
+pure background process — it never listens on an HTTP port. A regular Cloud Run service requires
+the container to bind `$PORT` and pass a startup health check, so this exact image would fail to
+deploy as one. Cloud Run Worker Pools are the resource built for this: continuously-running
+background workloads with no HTTP requirement. Worker Pools are a newer part of Cloud Run —
+before relying on the `update-worker-pool` step, confirm the command exists for you:
+`gcloud run worker-pools --help`. If gcloud doesn't recognize it, run
+`gcloud components install beta` and use `gcloud beta run worker-pools ...` instead (adjust the
+`update-worker-pool` step in `cloudbuild.yaml` to match).
 
 ## Before your first run: check what you already have
 
@@ -31,12 +43,15 @@ gcloud run services list --region=YOUR_REGION
 
 # Do you already have the plunk-migrate Cloud Run Job?
 gcloud run jobs list --region=YOUR_REGION
+
+# Do you already have a plunk-worker Cloud Run Worker Pool?
+gcloud run worker-pools list --region=YOUR_REGION
 ```
 
 Then open `cloudbuild.yaml` and edit the `substitutions` block at the top so `_REGION`,
-`_AR_REPO`, `_API_SERVICE`, `_WEB_SERVICE` and `_MIGRATE_JOB` match what you found — or leave the
-file alone and pass them on the command line instead (shown below), whichever is easier to keep
-straight.
+`_AR_REPO`, `_API_SERVICE`, `_WEB_SERVICE`, `_MIGRATE_JOB` and `_WORKER_POOL` match what you
+found — or leave the file alone and pass them on the command line instead (shown below),
+whichever is easier to keep straight.
 
 ## One-time setup
 
@@ -52,8 +67,12 @@ gcloud artifacts repositories create plunk \
 # 2. Let this Cloud Build pipeline push to it and deploy to Cloud Run.
 #    Cloud Build runs as a Google-managed service account named after your
 #    project number — find the number, then grant it the three roles it needs.
-#    roles/run.admin covers both Cloud Run services (plunk-api, plunk-web)
-#    and Cloud Run Jobs (plunk-migrate) — no separate role needed for the job.
+#    roles/run.admin covers Cloud Run services (plunk-api, plunk-web), Cloud
+#    Run Jobs (plunk-migrate), and — as far as we've verified — Worker Pools
+#    (plunk-worker) too, since they're all under the same run.googleapis.com
+#    API. If update-worker-pool fails with a permissions error even after
+#    granting this, it may need its own IAM permission as a newer resource
+#    type — check the error message for the specific permission it wants.
 PROJECT_NUMBER=$(gcloud projects describe "$(gcloud config get-value project)" --format='value(projectNumber)')
 CB_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
 
@@ -99,6 +118,20 @@ gcloud run jobs create plunk-migrate \
   --command="node_modules/.bin/prisma" \
   --args="migrate,deploy,--schema=packages/db/prisma/schema.prisma" \
   --set-env-vars="DATABASE_URL=...,DIRECT_DATABASE_URL=..."
+
+# plunk-worker (the Worker Pool running the BullMQ queue consumers) doesn't
+# exist yet — create it once, by hand. It needs the same runtime env vars as
+# the API (DATABASE_URL, REDIS_URL, S3_*, AWS_SES_*, etc. — see
+# apps/api/.env.example and turbo.json's dev:worker task for the full list).
+# Check `gcloud run worker-pools create --help` for the current flag set
+# (this is a newer resource type, so scaling/CPU flags may differ from what's
+# shown here) before running this for real:
+gcloud run worker-pools create plunk-worker \
+  --image="us-central1-docker.pkg.dev/$(gcloud config get-value project)/plunk/worker:bootstrap" \
+  --region=us-central1 \
+  --set-env-vars="DATABASE_URL=...,DIRECT_DATABASE_URL=...,REDIS_URL=...,S3_ENDPOINT=...,AWS_SES_REGION=..."
+# (again, the --image above is just a placeholder to satisfy creation — the
+#  next Cloud Build run replaces it with a real commit-tagged image)
 ```
 
 ## Running it
@@ -111,11 +144,11 @@ gcloud builds submit \
   --substitutions=_TAG=$(git rev-parse --short HEAD)
 ```
 
-That single command builds both images tagged with the current commit's short SHA, pushes them
-to Artifact Registry, rolls `plunk-api` and `plunk-web` over to the new images, and points
-`plunk-migrate` at the same new api image — nothing else about either service's configuration
-(env vars, secrets, scaling settings) is touched, and the migrate job is only *updated*, never
-executed automatically.
+That single command builds all three images tagged with the current commit's short SHA, pushes
+them to Artifact Registry, rolls `plunk-api` and `plunk-web` over to the new images, updates
+`plunk-worker` to the new worker image, and points `plunk-migrate` at the same new api image —
+nothing else about any of their configuration (env vars, secrets, scaling settings) is touched,
+and the migrate job is only *updated*, never executed automatically.
 
 If this build introduced new migrations, run them yourself once you're ready (this is a
 deliberate manual step, not part of the pipeline):
@@ -143,16 +176,15 @@ gcloud builds log --stream BUILD_ID
 gcloud builds list --limit=5
 ```
 
-If `deploy-api`, `deploy-web` or `update-migrate-job` fails with a permissions error, re-check
-step 2 of the one-time setup above — that's almost always a missing IAM role on the Cloud Build
-service account. If a `docker build` step fails complaining about `--mount` or BuildKit, check
-that step still has `env: ["DOCKER_BUILDKIT=1"]` set (see the BuildKit note above).
+If `deploy-api`, `deploy-web`, `update-migrate-job` or `update-worker-pool` fails with a
+permissions error, re-check step 2 of the one-time setup above — that's almost always a missing
+IAM role on the Cloud Build service account. If a `docker build` step fails complaining about
+`--mount` or BuildKit, check that step still has `env: ["DOCKER_BUILDKIT=1"]` set (see the
+BuildKit note above). If `update-worker-pool` fails with something like "Invalid choice:
+'worker-pools'", your gcloud CLI needs the beta component — see the Worker Pool note above.
 
 ## A note on scope
 
-This file intentionally does only `api` and `web`. `Dockerfile.services` already has a
-`worker-runner` target too (see `docs/deploy-cloud-run.md`'s sibling comment about it); when
-you're ready, adding it here is the same three-step chain (`build-worker` → `push-worker` →
-`deploy-worker`, deploying to a Cloud Run service or job rather than a request-serving service).
-`landing` and `wiki` aren't in `Dockerfile.services` yet — they're still only built as part of
-the all-in-one image (`Dockerfile`).
+This file does `api`, `web` and `worker`. `landing` and `wiki` aren't in `Dockerfile.services`
+yet — they're still only built as part of the all-in-one image (`Dockerfile`). Adding them here
+later is the same shape as the other three: another `build` → `push` → `deploy` step chain.
