@@ -11,6 +11,13 @@
 # Cloud Build runs the exact same `docker build` commands on a separate,
 # much bigger machine, so nothing is built on your Cloud Shell disk at all.
 #
+# BuildKit: the root Dockerfile uses `--mount=type=cache` on several RUN
+# lines (yarn/turbo/npm cache mounts) — that syntax only works with BuildKit,
+# and the `gcr.io/cloud-builders/docker` image used below does NOT enable it
+# by default the way a modern local Docker install does. Every `docker build`
+# step sets `env: ["DOCKER_BUILDKIT=1"]` to turn it on; without that these
+# builds fail immediately on the first cache-mounted RUN instruction.
+#
 # -----------------------------------------------------------------------------
 # PREREQUISITES (one-time, do these yourself before the first run — this file
 # deliberately does NOT create any of them, so it can never create a second
@@ -69,10 +76,11 @@
 # =============================================================================
 
 substitutions:
-  _REGION: us-central1 # <-- EDIT: region your Artifact Registry repo + Cloud Run services are in
-  _AR_REPO: plunk # <-- EDIT: Artifact Registry repository name
-  _API_SERVICE: plunk-api # <-- EDIT: Cloud Run service name for the API
-  _WEB_SERVICE: plunk-web # <-- EDIT: Cloud Run service name for the web dashboard
+  _REGION: us-central1 # region the Artifact Registry repo + Cloud Run services/job are in
+  _AR_REPO: plunk # Artifact Registry repository name
+  _API_SERVICE: plunk-api # Cloud Run service name for the API
+  _WEB_SERVICE: plunk-web # Cloud Run service name for the web dashboard
+  _MIGRATE_JOB: plunk-migrate # Cloud Run Job that runs `prisma migrate deploy` off the api image
   _TAG: latest # normally overridden per-run with the commit SHA (see above)
 
 # Cloud Build's default timeout is 10 minutes, which this build (installing
@@ -88,6 +96,7 @@ steps:
   # ---------------------------------------------------------------------
   - id: build-base
     name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
     args:
       [
         "build",
@@ -100,6 +109,7 @@ steps:
 
   - id: build-prod-deps
     name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
     args:
       [
         "build",
@@ -111,11 +121,13 @@ steps:
       ]
 
   # ---------------------------------------------------------------------
-  # 2. API image: build, push, deploy. Runs in parallel with the web chain
+  # 2. API image: build, push, deploy, and keep the plunk-migrate Cloud Run
+  #    Job pointed at the same image. Runs in parallel with the web chain
   #    below (both only wait on the two shared stages above).
   # ---------------------------------------------------------------------
   - id: build-api
     name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
     waitFor: ["build-base", "build-prod-deps"]
     args:
       [
@@ -150,11 +162,31 @@ steps:
         "--region=${_REGION}",
       ]
 
+  # Keeps plunk-migrate pointed at the same api image that was just deployed
+  # — this only updates the job's config, it does NOT run it. Migrations stay
+  # a deliberate, manual step: execute it yourself when you actually want to
+  # apply pending migrations, e.g.
+  #   gcloud run jobs execute ${_MIGRATE_JOB} --region=${_REGION} --wait
+  - id: update-migrate-job
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    waitFor: ["push-api"]
+    args:
+      [
+        "run",
+        "jobs",
+        "update",
+        "${_MIGRATE_JOB}",
+        "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/api:${_TAG}",
+        "--region=${_REGION}",
+      ]
+
   # ---------------------------------------------------------------------
   # 3. Web image: build, push, deploy.
   # ---------------------------------------------------------------------
   - id: build-web
     name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
     waitFor: ["build-base", "build-prod-deps"]
     args:
       [

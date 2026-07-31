@@ -1,13 +1,19 @@
 # Building and deploying api + web with Cloud Build
 
 `cloudbuild.yaml` (repo root) builds the `api` and `web` images from `Dockerfile.services`,
-pushes them to Artifact Registry, and updates the two Cloud Run services — all on Google's
-build infrastructure. Use this instead of running `docker build` in Cloud Shell: the monorepo
-build (installing dependencies and compiling every app) is big enough to fill Cloud Shell's
-small local disk, and Cloud Build doesn't have that limit.
+pushes them to Artifact Registry, updates the two Cloud Run services, and keeps the
+`plunk-migrate` Cloud Run Job pointed at the same api image — all on Google's build
+infrastructure. Use this instead of running `docker build` in Cloud Shell: the monorepo build
+(installing dependencies and compiling every app) is big enough to fill Cloud Shell's small
+local disk, and Cloud Build doesn't have that limit.
 
 Only `api` and `web` are wired up for now. `worker`, `landing` and `wiki` can be added the same
 way later — each is just another `build` → `push` → `deploy` step chain in the same file.
+
+**BuildKit**: the root `Dockerfile` uses `--mount=type=cache` (a BuildKit-only feature) to cache
+the yarn/turbo/npm installs between builds. The `gcr.io/cloud-builders/docker` image Cloud Build
+runs doesn't turn BuildKit on by default, so every `docker build` step in `cloudbuild.yaml` sets
+`env: ["DOCKER_BUILDKIT=1"]` — without it, the build fails on the first cache-mounted line.
 
 ## Before your first run: check what you already have
 
@@ -22,11 +28,15 @@ gcloud artifacts repositories list
 
 # Do you already have Cloud Run services? What are they named?
 gcloud run services list --region=YOUR_REGION
+
+# Do you already have the plunk-migrate Cloud Run Job?
+gcloud run jobs list --region=YOUR_REGION
 ```
 
 Then open `cloudbuild.yaml` and edit the `substitutions` block at the top so `_REGION`,
-`_AR_REPO`, `_API_SERVICE` and `_WEB_SERVICE` match what you found — or leave the file alone and
-pass them on the command line instead (shown below), whichever is easier to keep straight.
+`_AR_REPO`, `_API_SERVICE`, `_WEB_SERVICE` and `_MIGRATE_JOB` match what you found — or leave the
+file alone and pass them on the command line instead (shown below), whichever is easier to keep
+straight.
 
 ## One-time setup
 
@@ -42,6 +52,8 @@ gcloud artifacts repositories create plunk \
 # 2. Let this Cloud Build pipeline push to it and deploy to Cloud Run.
 #    Cloud Build runs as a Google-managed service account named after your
 #    project number — find the number, then grant it the three roles it needs.
+#    roles/run.admin covers both Cloud Run services (plunk-api, plunk-web)
+#    and Cloud Run Jobs (plunk-migrate) — no separate role needed for the job.
 PROJECT_NUMBER=$(gcloud projects describe "$(gcloud config get-value project)" --format='value(projectNumber)')
 CB_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
 
@@ -77,6 +89,16 @@ gcloud run deploy plunk-api \
   --set-env-vars="DATABASE_URL=...,DIRECT_DATABASE_URL=...,REDIS_URL=...,JWT_SECRET=...,DASHBOARD_URI=..."
 # (the --image above is a placeholder tag just to satisfy the first deploy —
 #  the very next Cloud Build run replaces it with a real commit-tagged image)
+
+# plunk-migrate (the Cloud Run Job that runs `prisma migrate deploy` off the
+# api image) is assumed to already exist — cloudbuild.yaml only ever updates
+# its image, it never creates the job. If it doesn't exist yet:
+gcloud run jobs create plunk-migrate \
+  --image="us-central1-docker.pkg.dev/$(gcloud config get-value project)/plunk/api:bootstrap" \
+  --region=us-central1 \
+  --command="node_modules/.bin/prisma" \
+  --args="migrate,deploy,--schema=packages/db/prisma/schema.prisma" \
+  --set-env-vars="DATABASE_URL=...,DIRECT_DATABASE_URL=..."
 ```
 
 ## Running it
@@ -90,8 +112,17 @@ gcloud builds submit \
 ```
 
 That single command builds both images tagged with the current commit's short SHA, pushes them
-to Artifact Registry, and rolls `plunk-api` and `plunk-web` over to the new images — nothing
-else about either service's configuration (env vars, secrets, scaling settings) is touched.
+to Artifact Registry, rolls `plunk-api` and `plunk-web` over to the new images, and points
+`plunk-migrate` at the same new api image — nothing else about either service's configuration
+(env vars, secrets, scaling settings) is touched, and the migrate job is only *updated*, never
+executed automatically.
+
+If this build introduced new migrations, run them yourself once you're ready (this is a
+deliberate manual step, not part of the pipeline):
+
+```bash
+gcloud run jobs execute plunk-migrate --region=us-central1 --wait
+```
 
 Override any of the location substitutions the same way, if you didn't edit the defaults in
 the file:
@@ -112,8 +143,10 @@ gcloud builds log --stream BUILD_ID
 gcloud builds list --limit=5
 ```
 
-If `deploy-api` or `deploy-web` fails with a permissions error, re-check step 2 of the one-time
-setup above — that's almost always a missing IAM role on the Cloud Build service account.
+If `deploy-api`, `deploy-web` or `update-migrate-job` fails with a permissions error, re-check
+step 2 of the one-time setup above — that's almost always a missing IAM role on the Cloud Build
+service account. If a `docker build` step fails complaining about `--mount` or BuildKit, check
+that step still has `env: ["DOCKER_BUILDKIT=1"]` set (see the BuildKit note above).
 
 ## A note on scope
 
