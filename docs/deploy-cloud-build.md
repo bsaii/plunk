@@ -120,19 +120,62 @@ gcloud run jobs create plunk-migrate \
   --set-env-vars="DATABASE_URL=...,DIRECT_DATABASE_URL=..."
 
 # plunk-worker (the Worker Pool running the BullMQ queue consumers) doesn't
-# exist yet — create it once, by hand. It needs the same runtime env vars as
-# the API (DATABASE_URL, REDIS_URL, S3_*, AWS_SES_*, etc. — see
-# apps/api/.env.example and turbo.json's dev:worker task for the full list).
-# Check `gcloud run worker-pools create --help` for the current flag set
-# (this is a newer resource type, so scaling/CPU flags may differ from what's
-# shown here) before running this for real:
+# exist yet — create it once, by hand. Its env vars are a SUBSET of the API's
+# (S3_*, OAuth, Stripe price IDs, etc. are HTTP-only and not needed here) —
+# see the "Worker environment variables" section below for exactly which ones
+# and why. Check `gcloud run worker-pools create --help` for the current flag
+# set (this is a newer resource type, so scaling/CPU flags may differ from
+# what's shown here) before running this for real:
 gcloud run worker-pools create plunk-worker \
   --image="us-central1-docker.pkg.dev/$(gcloud config get-value project)/plunk/worker:bootstrap" \
   --region=us-central1 \
-  --set-env-vars="DATABASE_URL=...,DIRECT_DATABASE_URL=...,REDIS_URL=...,S3_ENDPOINT=...,AWS_SES_REGION=..."
+  --set-env-vars="NODE_ENV=production,DATABASE_URL=...,DIRECT_DATABASE_URL=...,REDIS_URL=...,AWS_SES_REGION=...,AWS_SES_ACCESS_KEY_ID=...,AWS_SES_SECRET_ACCESS_KEY=...,DASHBOARD_URI=...,LANDING_URI=...,API_URI=...,WIKI_URI=...,JWT_SECRET=..."
 # (again, the --image above is just a placeholder to satisfy creation — the
 #  next Cloud Build run replaces it with a real commit-tagged image)
 ```
+
+### Worker environment variables
+
+Traced from `apps/api/src/jobs/worker.ts`'s actual import graph (verified by running the compiled
+worker against a real local Postgres + Redis — see PR discussion). The worker's `app/constants.ts`
+validates several vars at import time regardless of which queue ever runs a job, so a few of these
+are "required to boot" without being functionally used by any processor.
+
+**Required — actually used by worker logic:**
+
+| Variable | Why |
+| --- | --- |
+| `REDIS_URL` | BullMQ connection (every queue) |
+| `DATABASE_URL` | Prisma — every processor queries the DB |
+| `AWS_SES_REGION`, `AWS_SES_ACCESS_KEY_ID`, `AWS_SES_SECRET_ACCESS_KEY` | Sending email (email-processor), rate-limit lookup |
+| `DASHBOARD_URI` | Unsubscribe/manage links baked into sent emails |
+| `LANDING_URI` | Used in notification email templates (domain verification, billing limit) |
+
+**Required to boot, but not otherwise used by the worker** (set to a real value anyway — cheap
+insurance against a future code path needing it, and `API_URI` becomes a real dependency the
+moment `PLUNK_API_KEY` is set):
+
+| Variable | Note |
+| --- | --- |
+| `DIRECT_DATABASE_URL` | Set the same as `DATABASE_URL` — only the Prisma schema's `directUrl` (migrations) cares about the distinction, and the worker never migrates |
+| `JWT_SECRET` | Only read by HTTP auth middleware; use the same value as `plunk-api` |
+| `API_URI` | Unused unless `PLUNK_API_KEY` is set, in which case platform notification emails call it |
+| `WIKI_URI` | Never referenced by worker logic at all |
+
+**Optional — only if you use the feature:**
+
+`SES_CONFIGURATION_SET` / `SES_CONFIGURATION_SET_NO_TRACKING` (default to the standard names),
+`EMAIL_RATE_LIMIT_PER_SECOND` / `EMAIL_WORKER_CONCURRENCY` / `EMAIL_WORKER_MAX_CONCURRENCY`
+(tuning), `STRIPE_SK` / `STRIPE_WEBHOOK_SECRET` / `STRIPE_METER_EVENT_NAME` (billing),
+`PLUNK_API_KEY` / `PLUNK_FROM_ADDRESS` (platform notification emails), `NTFY_URL` (ops
+notifications), `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` / `PHISHING_*` (phishing detection).
+`NODE_ENV=production` is worth setting explicitly too.
+
+**Not needed at all** (confirmed unreachable from the worker's code path — these are HTTP-only):
+`S3_*` (uploads go through the API service, not the worker), `GITHUB_OAUTH_*` / `GOOGLE_OAUTH_*`,
+`STRIPE_PRICE_ONBOARDING` / `STRIPE_PRICE_EMAIL_USAGE` (checkout), `AUTO_PROJECT_DISABLE` (SNS
+webhook handler), `SMTP_*` / `PORT_SECURE` / `PORT_SUBMISSION`, `PORT` (the worker never listens
+on one), `DISABLE_SIGNUPS`, `VERIFY_EMAIL_ON_SIGNUP`.
 
 ## Running it
 
