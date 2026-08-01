@@ -88,26 +88,57 @@ gcloud projects add-iam-policy-binding "$(gcloud config get-value project)" \
 
 ```bash
 # 3. The Cloud Run services themselves. `gcloud run deploy --image=...` (what
-#    cloudbuild.yaml runs) only ever UPDATES an existing service's image — it
-#    can't do the interactive first-time deploy (flags like
-#    --allow-unauthenticated only need setting once, and Cloud Build steps
-#    have no terminal to prompt you for them). If plunk-api / plunk-web don't
-#    exist yet, create them once, by hand, from Cloud Shell:
+#    cloudbuild.yaml runs) is normally create-or-update, but a `check-*-exists`
+#    step now runs before each deploy step and fails the build if the service
+#    is missing — specifically so a build can never silently create a
+#    mis-configured plunk-api/plunk-web from scratch. If they don't exist
+#    yet, create them once, by hand, from Cloud Shell — order matters a bit
+#    since each needs the other's URL:
 
-# Web dashboard — see docs/deploy-cloud-run.md for the full first-deploy flow
-# (it also covers the custom-domain / auth-cookie requirements).
-
-# API — same shape, with the API's own env vars (DATABASE_URL, REDIS_URL,
-# JWT_SECRET, S3_*, AWS_SES_*, etc. — see apps/api/.env.example):
+# API first — same shape as web below, with the API's own env vars
+# (DATABASE_URL, REDIS_URL, JWT_SECRET, S3_*, AWS_SES_*, etc. — see
+# apps/api/.env.example). DASHBOARD_URI isn't known yet at this point, so
+# leave it pointing at localhost for now — you'll circle back and fix it
+# once plunk-web exists too, same two-step dance as below.
 gcloud run deploy plunk-api \
   --image="us-central1-docker.pkg.dev/$(gcloud config get-value project)/plunk/api:bootstrap" \
   --region=us-central1 \
   --platform=managed \
   --allow-unauthenticated \
   --port=8080 \
-  --set-env-vars="DATABASE_URL=...,DIRECT_DATABASE_URL=...,REDIS_URL=...,JWT_SECRET=...,DASHBOARD_URI=..."
-# (the --image above is a placeholder tag just to satisfy the first deploy —
-#  the very next Cloud Build run replaces it with a real commit-tagged image)
+  --set-env-vars="DATABASE_URL=...,DIRECT_DATABASE_URL=...,REDIS_URL=...,JWT_SECRET=...,DASHBOARD_URI=http://localhost:3000"
+
+API_URI=$(gcloud run services describe plunk-api --region=us-central1 --format='value(status.url)')
+echo "plunk-api is at: $API_URI"
+
+# Web dashboard next — needs the real plunk-api URL for API_URI. Its own URL
+# (DASHBOARD_URI) still isn't known until after this first deploy, so the
+# same two-step dance as docs/deploy-cloud-run.md applies: deploy once, read
+# the URL back, then patch DASHBOARD_URI on both services.
+gcloud run deploy plunk-web \
+  --image="us-central1-docker.pkg.dev/$(gcloud config get-value project)/plunk/web:bootstrap" \
+  --region=us-central1 \
+  --platform=managed \
+  --allow-unauthenticated \
+  --port=8080 \
+  --cpu=1 \
+  --memory=512Mi \
+  --min-instances=0 \
+  --max-instances=10 \
+  --set-env-vars="API_URI=${API_URI},LANDING_URI=https://www.example.com,WIKI_URI=https://docs.example.com"
+
+DASHBOARD_URI=$(gcloud run services describe plunk-web --region=us-central1 --format='value(status.url)')
+echo "plunk-web is at: $DASHBOARD_URI"
+
+# Now that DASHBOARD_URI is known, patch it onto BOTH services — the API
+# needs it for CORS + the auth cookie domain, matching docs/deploy-cloud-run.md.
+gcloud run services update plunk-api --region=us-central1 --update-env-vars="DASHBOARD_URI=${DASHBOARD_URI}"
+gcloud run services update plunk-web --region=us-central1 --update-env-vars="DASHBOARD_URI=${DASHBOARD_URI}"
+# (the --image flags above are placeholder tags just to satisfy the first
+#  deploy — the very next Cloud Build run replaces both with real
+#  commit-tagged images. See docs/deploy-cloud-run.md for the custom-domain
+#  / auth-cookie requirements you'll want before using this for real users —
+#  default *.run.app URLs silently break login, as that doc explains.)
 
 # plunk-migrate (the Cloud Run Job that runs `prisma migrate deploy` off the
 # api image) is assumed to already exist — cloudbuild.yaml only ever updates
@@ -218,6 +249,11 @@ gcloud builds log --stream BUILD_ID
 # List recent builds and their status.
 gcloud builds list --limit=5
 ```
+
+If `check-api-exists` or `check-web-exists` fails ("NOT_FOUND" / non-zero exit), the service
+hasn't been created yet — do the one-time bootstrap deploy in step 3 above first. These two steps
+don't `waitFor` anything, so they run immediately and fail within seconds rather than after the
+whole (slow) build — you don't have to wait 15+ minutes to find out you skipped a step.
 
 If `deploy-api`, `deploy-web`, `update-migrate-job` or `update-worker-pool` fails with a
 permissions error, re-check step 2 of the one-time setup above — that's almost always a missing

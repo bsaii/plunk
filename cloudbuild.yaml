@@ -156,10 +156,29 @@ steps:
         "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/api:${_TAG}",
       ]
 
+  # Unlike `worker-pools update`/`jobs update`, `gcloud run deploy` is
+  # create-or-update — it would happily CREATE plunk-api from scratch if it
+  # didn't already exist, but with none of its real config (no
+  # --allow-unauthenticated, no env vars), i.e. a silently broken deploy.
+  # This check makes that fail loudly instead: bootstrap the service by hand
+  # first (docs/deploy-cloud-build.md) if this step errors "not found".
+  - id: check-api-exists
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      [
+        "run",
+        "services",
+        "describe",
+        "${_API_SERVICE}",
+        "--region=${_REGION}",
+        "--format=value(metadata.name)",
+      ]
+
   - id: deploy-api
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
-    waitFor: ["push-api"]
+    waitFor: ["push-api", "check-api-exists"]
     args:
       [
         "run",
@@ -215,10 +234,25 @@ steps:
         "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/web:${_TAG}",
       ]
 
+  # Same reasoning as check-api-exists above — bootstrap plunk-web by hand
+  # first (docs/deploy-cloud-build.md) if this step errors "not found".
+  - id: check-web-exists
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      [
+        "run",
+        "services",
+        "describe",
+        "${_WEB_SERVICE}",
+        "--region=${_REGION}",
+        "--format=value(metadata.name)",
+      ]
+
   - id: deploy-web
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
-    waitFor: ["push-web"]
+    waitFor: ["push-web", "check-web-exists"]
     args:
       [
         "run",
