@@ -16,22 +16,23 @@ import {
   S3_ENDPOINT,
   S3_FORCE_PATH_STYLE,
   S3_PUBLIC_URL,
+  S3_REGION,
 } from '../app/constants.js';
 
 /**
- * S3-compatible storage client for Minio
+ * S3-compatible storage client for Minio or real AWS S3
  */
 let s3Client: S3Client | null = null;
 
 if (S3_ENABLED) {
   s3Client = new S3Client({
-    region: 'us-east-1', // Minio doesn't use regions, but AWS SDK requires this parameter
+    region: S3_REGION, // Minio ignores this; real S3 requires it to match the bucket's region for SigV4 signing
     endpoint: S3_ENDPOINT,
     credentials: {
       accessKeyId: S3_ACCESS_KEY_ID,
       secretAccessKey: S3_ACCESS_KEY_SECRET,
     },
-    forcePathStyle: S3_FORCE_PATH_STYLE, // Required for Minio (uses path-style URLs)
+    forcePathStyle: S3_FORCE_PATH_STYLE, // Required for Minio (uses path-style URLs); should be false for real S3
   });
 }
 
