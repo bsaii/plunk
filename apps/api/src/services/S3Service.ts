@@ -37,6 +37,37 @@ if (S3_ENABLED) {
 }
 
 /**
+ * Extract the HTTP status code from an AWS SDK error, if present.
+ */
+function getHttpStatusCode(error: unknown): number | undefined {
+  if (
+    error &&
+    typeof error === 'object' &&
+    '$metadata' in error &&
+    error.$metadata &&
+    typeof error.$metadata === 'object' &&
+    'httpStatusCode' in error.$metadata &&
+    typeof error.$metadata.httpStatusCode === 'number'
+  ) {
+    return error.$metadata.httpStatusCode;
+  }
+  return undefined;
+}
+
+/**
+ * Log an actionable hint for 403 responses. AWS SDK v3 often surfaces these as an opaque
+ * "Unknown: UnknownError" (S3 omits the XML error body on HEAD responses), so the underlying
+ * IAM problem isn't obvious from the stack trace alone.
+ */
+function logForbiddenHint(action: string): void {
+  signale.error(
+    `[S3] Got a 403 Forbidden response while trying to ${action}. Check that the IAM policy's ` +
+      'Resource ARN is exactly `arn:aws:s3:::<bucket>` (a common mistake is doubling the prefix into ' +
+      '`arn:aws:s3:::arn:aws:s3:::<bucket>`), and that it grants the action being performed.',
+  );
+}
+
+/**
  * Initialize the S3 bucket if it doesn't exist
  */
 export async function initializeBucket(): Promise<void> {
@@ -53,15 +84,9 @@ export async function initializeBucket(): Promise<void> {
       }),
     );
   } catch (error: unknown) {
+    const statusCode = getHttpStatusCode(error);
     const isNotFoundError =
-      error &&
-      typeof error === 'object' &&
-      (('name' in error && error.name === 'NotFound') ||
-        ('$metadata' in error &&
-          error.$metadata &&
-          typeof error.$metadata === 'object' &&
-          'httpStatusCode' in error.$metadata &&
-          error.$metadata.httpStatusCode === 404));
+      (error && typeof error === 'object' && 'name' in error && error.name === 'NotFound') || statusCode === 404;
     if (isNotFoundError) {
       bucketExists = false;
       // Bucket doesn't exist, create it
@@ -74,10 +99,16 @@ export async function initializeBucket(): Promise<void> {
         signale.info(`[S3] Created bucket: ${S3_BUCKET}`);
       } catch (createError) {
         signale.error('[S3] Failed to create bucket:', createError);
+        if (getHttpStatusCode(createError) === 403) {
+          logForbiddenHint('create the bucket (s3:CreateBucket)');
+        }
         throw createError;
       }
     } else {
       signale.error('[S3] Failed to check bucket:', error);
+      if (statusCode === 403) {
+        logForbiddenHint('check the bucket (s3:ListBucket / s3:HeadBucket)');
+      }
       throw error;
     }
   }
@@ -109,6 +140,9 @@ export async function initializeBucket(): Promise<void> {
     }
   } catch (policyError) {
     signale.error('[S3] Failed to set bucket policy:', policyError);
+    if (getHttpStatusCode(policyError) === 403) {
+      logForbiddenHint('set the bucket policy (s3:PutBucketPolicy)');
+    }
     // Don't throw - bucket was created but policy failed
   }
 }
