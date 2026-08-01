@@ -239,6 +239,89 @@ gcloud builds submit --config=cloudbuild.yaml \
   --substitutions=_TAG=$(git rev-parse --short HEAD),_REGION=europe-west1,_AR_REPO=plunk,_API_SERVICE=plunk-api,_WEB_SERVICE=plunk-web
 ```
 
+## Continuous deployment: wiring GitHub to Cloud Build
+
+Everything above is you manually running `gcloud builds submit`. To have Cloud Build build and
+deploy automatically whenever you merge, you need a **Cloud Build Trigger** watching the GitHub
+repo — no GitHub Actions required. Cloud Build has native GitHub integration and just runs this
+same `cloudbuild.yaml`; there's no second CI config to keep in sync.
+
+**Why not GitHub Actions:** you could wire this to a GitHub Actions workflow instead (one that
+shells out to `gcloud builds submit`, or runs `docker build`/`push`/`gcloud run deploy` directly
+on a GitHub-hosted runner), but that means setting up a GCP service account key or Workload
+Identity Federation just so GitHub can authenticate to your project, and the build would run on
+GitHub's runners instead of Cloud Build's — weaker disk/CPU, and you'd lose the shared
+`builder`/`prod-deps` layer caching this file already gets from running on the same Cloud Build
+worker pool every time. Since you're already all-in on Cloud Build/Artifact Registry/Cloud Run, a
+native trigger is strictly less to maintain.
+
+### One-time: connect the repo
+
+Cloud Build genuinely has no idea `bsaii/plunk` exists yet. Connecting it means authorizing a
+GitHub App, which is an interactive browser step no CLI command avoids. **Do this one through the
+console**: Cloud Build → Triggers → Connect Repository → GitHub → authorize the app on
+`bsaii/plunk`. The guided flow handles the OAuth/App-install dance and is the more foolproof path
+for a first connection. Everything after (creating/editing triggers) can be done via gcloud or
+console from then on.
+
+### Create the trigger
+
+Console: Cloud Build → Triggers → Create Trigger → pick the connected `plunk` repo → event "Push
+to a branch" → branch pattern `^production$` → configuration "Cloud Build configuration file" →
+path `cloudbuild.yaml`. Set the `_TAG` substitution to `$SHORT_SHA` — a built-in variable Cloud
+Build fills in automatically for trigger-fired builds, the same commit-SHA tagging every manual
+run above uses, just no longer something you type.
+
+Equivalent gcloud (double-check the exact flags with `gcloud builds triggers create github --help`
+first — this API's shape has changed a couple of times, so treat this as a starting point):
+
+```bash
+gcloud builds triggers create github \
+  --name=plunk-deploy-on-merge \
+  --region=us-central1 \
+  --repository=projects/$(gcloud config get-value project)/locations/us-central1/connections/<your-connection-name>/repositories/<your-repo-name> \
+  --branch-pattern="^production$" \
+  --build-config=cloudbuild.yaml \
+  --substitutions=_TAG='$SHORT_SHA'
+```
+
+No `--require-approval` flag — every merge deploys immediately, no manual gate. (If you want one
+later: add `--require-approval` and the trigger queues each build pending a click in
+Console → Cloud Build → History before it actually runs.)
+
+### What happens when you merge
+
+1. You merge a PR into `production` on GitHub.
+2. GitHub sends Cloud Build a webhook; the trigger's branch pattern matches, so it queues a build.
+3. Cloud Build clones the repo at that merge commit, resolves `$SHORT_SHA` to the real commit
+   hash, and runs `cloudbuild.yaml` exactly like a manual `gcloud builds submit` — same steps,
+   same service account, same IAM.
+4. It builds all three images tagged with that commit, pushes them to Artifact Registry, rolls
+   `plunk-api` and `plunk-web` over to the new images, updates `plunk-worker`, and updates (never
+   executes) `plunk-migrate`'s image.
+5. You watch it in Console → Cloud Build → History, same as any manual run.
+
+One real nuance: steps aren't transactional across the whole build. If `build-web` fails,
+`plunk-api` may already have rolled to the new commit while `plunk-web` stays on the old one —
+"the build failed" doesn't always mean "nothing changed."
+
+### Cloud Build basics, briefly
+
+- **Triggers** (Console: Cloud Build → Triggers) — the thing watching a repo that decides when to
+  fire a build. Yours shows up here once created; pause, edit, or manually re-run it from this
+  screen any time.
+- **History** (Console: Cloud Build → History) — every build, past and in-progress, with per-step
+  logs (`gcloud builds log --stream BUILD_ID` is the CLI equivalent), duration, and the resolved
+  substitution values that build actually ran with.
+- **Service account** — the same `PROJECT_NUMBER@cloudbuild.gserviceaccount.com` already granted
+  `artifactregistry.writer`/`run.admin`/`iam.serviceAccountUser` in the one-time setup above.
+  Manual and trigger-fired builds both run as this identity — nothing new to grant.
+- **Where the images land** — Artifact Registry → your `plunk` repo, browsable per-image with
+  every tag/digest.
+- **Cost** — Cloud Build has a daily free-tier build-minute allowance, then bills per build-minute
+  by machine type; `E2_HIGHCPU_8` (what `cloudbuild.yaml` requests) costs more per minute than the
+  default but finishes this particular build faster.
+
 ## Watching a run / troubleshooting
 
 ```bash
