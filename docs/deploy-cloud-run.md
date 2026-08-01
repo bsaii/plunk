@@ -4,6 +4,12 @@ Build, push and deploy the `web-runner` image from `Dockerfile.services` as its 
 service. The API and worker images from the same file follow the identical build/push flow — only
 the target, the service name and the environment differ.
 
+> **Building from Cloud Shell?** The `docker build` commands below run on your own machine's
+> disk, and this monorepo's build is large enough to fill Cloud Shell's small local disk. See
+> [`deploy-cloud-build.md`](./deploy-cloud-build.md) for a Cloud Build pipeline that builds the
+> `api` and `web` images on Google's infrastructure instead — this page is still the reference for
+> the one-time first deploy either way (Cloud Build only ever updates an existing service).
+
 ## Prerequisites
 
 ```bash

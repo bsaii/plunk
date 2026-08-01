@@ -54,6 +54,38 @@ The bundled Docker setup includes Minio with defaults that work out of the box. 
 | `S3_BUCKET`            | No       | Bucket name for file uploads.                                      | `uploads`           |
 | `S3_PUBLIC_URL`        | No       | Publicly accessible base URL for stored files.                     | —                   |
 | `S3_FORCE_PATH_STYLE`  | No       | Use path-style URLs instead of virtual-hosted. Required for Minio. | `true`              |
+| `S3_REGION`            | No       | AWS region the bucket lives in. Only matters for real S3 (Minio ignores it) — must match the bucket's actual region or uploads fail with a signature/region mismatch error. | `us-east-1` |
+
+### Using real AWS S3 instead of Minio
+
+Point the same variables at a real bucket instead of the bundled Minio service:
+
+```bash
+S3_ENDPOINT=https://s3.<your-bucket-region>.amazonaws.com
+S3_ACCESS_KEY_ID=<IAM access key>
+S3_ACCESS_KEY_SECRET=<IAM secret key>
+S3_BUCKET=<your-bucket-name>
+S3_PUBLIC_URL=https://<your-bucket-name>.s3.<your-bucket-region>.amazonaws.com
+S3_FORCE_PATH_STYLE=false
+S3_REGION=<your-bucket-region>
+```
+
+`S3_FORCE_PATH_STYLE=false` and a matching `S3_REGION` both matter for real S3 — Minio doesn't
+care about either, but AWS's request signing does.
+
+Two things that are easy to miss:
+
+- **IAM permissions**: on startup the app calls `HeadBucket`/`CreateBucket`/`PutBucketPolicy` to
+  make sure the bucket exists and is publicly readable, plus `PutObject`/`GetObject` per upload.
+  If you pre-create the bucket yourself, you can scope the IAM policy down to just
+  `s3:GetObject`/`s3:PutObject`/`s3:HeadBucket` on that bucket and skip granting
+  `s3:CreateBucket`/`s3:PutBucketPolicy`.
+- **S3 Block Public Access**: new AWS buckets have this on by default, which silently rejects the
+  startup `PutBucketPolicy` call (the app logs a warning and keeps going rather than crashing).
+  The practical effect: uploaded files 403 for anyone opening `S3_PUBLIC_URL` in a browser or
+  email client. Either turn off Block Public Access for this bucket, or — better for a
+  production setup — put a CloudFront distribution in front of the bucket instead of making it
+  public directly, and set `S3_PUBLIC_URL` to the CloudFront domain.
 
 ## Attachments
 

@@ -1,0 +1,329 @@
+# =============================================================================
+# Cloud Build pipeline: api + web
+# =============================================================================
+# Builds the "api", "web" and "worker" service images (see Dockerfile.services)
+# on Google's build infrastructure instead of your local machine, pushes them
+# to Artifact Registry, then rolls each Cloud Run service/job/worker pool over
+# to the new image.
+#
+# Why Cloud Build instead of `docker build` in Cloud Shell: Cloud Shell's VM
+# has a small local disk, and this monorepo's build (installing dependencies
+# for every app + compiling api/wiki/web/landing) is big enough to fill it.
+# Cloud Build runs the exact same `docker build` commands on a separate,
+# much bigger machine, so nothing is built on your Cloud Shell disk at all.
+#
+# BuildKit: the root Dockerfile uses `--mount=type=cache` on several RUN
+# lines (yarn/turbo/npm cache mounts) — that syntax only works with BuildKit,
+# and the `gcr.io/cloud-builders/docker` image used below does NOT enable it
+# by default the way a modern local Docker install does. Every `docker build`
+# step sets `env: ["DOCKER_BUILDKIT=1"]` to turn it on; without that these
+# builds fail immediately on the first cache-mounted RUN instruction.
+#
+# -----------------------------------------------------------------------------
+# PREREQUISITES (one-time, do these yourself before the first run — this file
+# deliberately does NOT create any of them, so it can never create a second
+# copy of something you already made in the console):
+#
+#   1. An Artifact Registry Docker repo — check first:
+#        gcloud artifacts repositories describe REPO_NAME --location=REGION
+#      If it doesn't exist yet:
+#        gcloud artifacts repositories create REPO_NAME \
+#          --repository-format=docker --location=REGION
+#
+#   2. The Cloud Run services/job/worker pool themselves — "plunk-api" and
+#      "plunk-web" (services), "plunk-migrate" (job), "plunk-worker" (worker
+#      pool), or whatever you already named them:
+#        gcloud run services list --region=REGION
+#        gcloud run jobs list --region=REGION
+#        gcloud run worker-pools list --region=REGION
+#      Every resource must exist before this file's update commands
+#      (`run deploy`, `run jobs update`, `run worker-pools update`) can touch
+#      it — this file only ever *updates* the image on something that
+#      already exists, it never runs the interactive first-time create
+#      (that needs flags like --allow-unauthenticated that only make sense
+#      once, and Cloud Build steps have no terminal to prompt you on).
+#      First deploy/create is a one-off, from your terminal — see
+#      docs/deploy-cloud-run.md for the web service's first-deploy command;
+#      docs/deploy-cloud-build.md has the api, migrate job and worker pool
+#      equivalents.
+#
+#   3. Cloud Build's service account needs permission to push images and
+#      deploy to Cloud Run. Grant these once (replace PROJECT_NUMBER — find
+#      it with `gcloud projects describe $(gcloud config get-value project)
+#      --format='value(projectNumber)'`):
+#
+#        PROJECT_NUMBER=<your project number>
+#        CB_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
+#
+#        gcloud projects add-iam-policy-binding $(gcloud config get-value project) \
+#          --member="serviceAccount:${CB_SA}" --role="roles/artifactregistry.writer"
+#
+#        gcloud projects add-iam-policy-binding $(gcloud config get-value project) \
+#          --member="serviceAccount:${CB_SA}" --role="roles/run.admin"
+#
+#        gcloud projects add-iam-policy-binding $(gcloud config get-value project) \
+#          --member="serviceAccount:${CB_SA}" --role="roles/iam.serviceAccountUser"
+#
+# -----------------------------------------------------------------------------
+# HOW TO RUN IT (from Cloud Shell, in the repo root):
+#
+#   gcloud builds submit \
+#     --config=cloudbuild.yaml \
+#     --substitutions=_TAG=$(git rev-parse --short HEAD)
+#
+# _TAG is the only substitution you need to pass per run — it tags both
+# images with the commit they were built from. The rest (_REGION, _AR_REPO,
+# _API_SERVICE, _WEB_SERVICE below) describe *where things already live*, so
+# set those to match your console once, not per run. Either edit the
+# defaults below, or override any of them the same way as _TAG, e.g.:
+#
+#   gcloud builds submit --config=cloudbuild.yaml \
+#     --substitutions=_TAG=$(git rev-parse --short HEAD),_REGION=europe-west1
+# =============================================================================
+
+substitutions:
+  _REGION: us-central1 # region the Artifact Registry repo + Cloud Run services/job are in
+  _AR_REPO: plunk # Artifact Registry repository name
+  _API_SERVICE: plunk-api # Cloud Run service name for the API
+  _WEB_SERVICE: plunk-web # Cloud Run service name for the web dashboard
+  _MIGRATE_JOB: plunk-migrate # Cloud Run Job that runs `prisma migrate deploy` off the api image
+  _WORKER_POOL: plunk-worker # Cloud Run Worker Pool running the BullMQ worker (see note below)
+  _TAG: latest # normally overridden per-run with the commit SHA (see above)
+
+# Cloud Build's default timeout is 10 minutes, which this build (installing
+# deps + compiling every app) does not fit in — 40 minutes gives it headroom.
+timeout: 2400s
+
+steps:
+  # ---------------------------------------------------------------------
+  # 1. Shared base stages, built once and reused by both service images.
+  #    `deps`/install + compiling every app in the monorepo happens here;
+  #    the api and web builds below just copy the already-built output out
+  #    of these two images instead of redoing it.
+  # ---------------------------------------------------------------------
+  - id: build-base
+    name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args:
+      [
+        "build",
+        "--platform=linux/amd64",
+        "--target=builder",
+        "-t=plunk-builder:${_TAG}",
+        "-f=Dockerfile",
+        ".",
+      ]
+
+  - id: build-prod-deps
+    name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args:
+      [
+        "build",
+        "--platform=linux/amd64",
+        "--target=prod-deps",
+        "-t=plunk-prod-deps:${_TAG}",
+        "-f=Dockerfile",
+        ".",
+      ]
+
+  # ---------------------------------------------------------------------
+  # 2. API image: build, push, deploy, and keep the plunk-migrate Cloud Run
+  #    Job pointed at the same image. Runs in parallel with the web chain
+  #    below (both only wait on the two shared stages above).
+  # ---------------------------------------------------------------------
+  - id: build-api
+    name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    waitFor: ["build-base", "build-prod-deps"]
+    args:
+      [
+        "build",
+        "--platform=linux/amd64",
+        "--build-arg=PLUNK_VERSION=${_TAG}",
+        "--target=api-runner",
+        "-t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/api:${_TAG}",
+        "-f=Dockerfile.services",
+        ".",
+      ]
+
+  - id: push-api
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["build-api"]
+    args:
+      [
+        "push",
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/api:${_TAG}",
+      ]
+
+  # Unlike `worker-pools update`/`jobs update`, `gcloud run deploy` is
+  # create-or-update — it would happily CREATE plunk-api from scratch if it
+  # didn't already exist, but with none of its real config (no
+  # --allow-unauthenticated, no env vars), i.e. a silently broken deploy.
+  # This check makes that fail loudly instead: bootstrap the service by hand
+  # first (docs/deploy-cloud-build.md) if this step errors "not found".
+  - id: check-api-exists
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      [
+        "run",
+        "services",
+        "describe",
+        "${_API_SERVICE}",
+        "--region=${_REGION}",
+        "--format=value(metadata.name)",
+      ]
+
+  - id: deploy-api
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    waitFor: ["push-api", "check-api-exists"]
+    args:
+      [
+        "run",
+        "deploy",
+        "${_API_SERVICE}",
+        "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/api:${_TAG}",
+        "--region=${_REGION}",
+      ]
+
+  # Keeps plunk-migrate pointed at the same api image that was just deployed
+  # — this only updates the job's config, it does NOT run it. Migrations stay
+  # a deliberate, manual step: execute it yourself when you actually want to
+  # apply pending migrations, e.g.
+  #   gcloud run jobs execute ${_MIGRATE_JOB} --region=${_REGION} --wait
+  - id: update-migrate-job
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    waitFor: ["push-api"]
+    args:
+      [
+        "run",
+        "jobs",
+        "update",
+        "${_MIGRATE_JOB}",
+        "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/api:${_TAG}",
+        "--region=${_REGION}",
+      ]
+
+  # ---------------------------------------------------------------------
+  # 3. Web image: build, push, deploy.
+  # ---------------------------------------------------------------------
+  - id: build-web
+    name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    waitFor: ["build-base", "build-prod-deps"]
+    args:
+      [
+        "build",
+        "--platform=linux/amd64",
+        "--build-arg=PLUNK_VERSION=${_TAG}",
+        "--target=web-runner",
+        "-t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/web:${_TAG}",
+        "-f=Dockerfile.services",
+        ".",
+      ]
+
+  - id: push-web
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["build-web"]
+    args:
+      [
+        "push",
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/web:${_TAG}",
+      ]
+
+  # Same reasoning as check-api-exists above — bootstrap plunk-web by hand
+  # first (docs/deploy-cloud-build.md) if this step errors "not found".
+  - id: check-web-exists
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      [
+        "run",
+        "services",
+        "describe",
+        "${_WEB_SERVICE}",
+        "--region=${_REGION}",
+        "--format=value(metadata.name)",
+      ]
+
+  - id: deploy-web
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    waitFor: ["push-web", "check-web-exists"]
+    args:
+      [
+        "run",
+        "deploy",
+        "${_WEB_SERVICE}",
+        "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/web:${_TAG}",
+        "--region=${_REGION}",
+      ]
+
+  # ---------------------------------------------------------------------
+  # 4. Worker image: build, push, update the Worker Pool.
+  #
+  #    apps/api/src/jobs/worker.js is a pure background process (it never
+  #    binds an HTTP port), which is exactly what Cloud Run Worker Pools are
+  #    for — unlike a regular Cloud Run service, a worker pool never expects
+  #    the container to listen on $PORT or pass an HTTP health check.
+  #
+  #    This step deliberately uses `worker-pools update`, NOT `create` and
+  #    NOT `deploy` (the equivalent for regular services can create AND
+  #    update — worker pools don't get that convenience here on purpose):
+  #    if plunk-worker doesn't exist yet, `update` fails loudly instead of
+  #    silently creating a brand-new pool with none of your real
+  #    configuration (env vars, scaling, etc.). Create it once yourself —
+  #    see docs/deploy-cloud-build.md.
+  #
+  #    Worker Pools are a newer Cloud Run resource — verify the exact
+  #    command works in your Cloud Shell first with:
+  #      gcloud run worker-pools --help
+  #    If gcloud doesn't recognize it, install the beta component
+  #    (`gcloud components install beta`) and use `gcloud beta run
+  #    worker-pools update` instead in the step below.
+  # ---------------------------------------------------------------------
+  - id: build-worker
+    name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    waitFor: ["build-base", "build-prod-deps"]
+    args:
+      [
+        "build",
+        "--platform=linux/amd64",
+        "--build-arg=PLUNK_VERSION=${_TAG}",
+        "--target=worker-runner",
+        "-t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/worker:${_TAG}",
+        "-f=Dockerfile.services",
+        ".",
+      ]
+
+  - id: push-worker
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["build-worker"]
+    args:
+      [
+        "push",
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/worker:${_TAG}",
+      ]
+
+  - id: update-worker-pool
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    waitFor: ["push-worker"]
+    args:
+      [
+        "run",
+        "worker-pools",
+        "update",
+        "${_WORKER_POOL}",
+        "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/worker:${_TAG}",
+        "--region=${_REGION}",
+      ]
+
+# Steps above already `docker push` explicitly (so the image exists in the
+# registry before the deploy step that needs it — the alternative, listing
+# images here under a top-level `images:` key, only pushes *after* every
+# step finishes, which would be too late for `deploy-api`/`deploy-web`).
