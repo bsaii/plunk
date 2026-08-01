@@ -94,6 +94,18 @@ substitutions:
 # deps + compiling every app) does not fit in — 40 minutes gives it headroom.
 timeout: 2400s
 
+# Some projects now assign builds a non-default (non-legacy) service account
+# by default. The moment that's true, Cloud Build refuses to guess where logs
+# should go and errors with "if build.service_account is specified, the build
+# must either (a) specify build.logs_bucket, (b) use the
+# REGIONAL_USER_OWNED_BUCKET build.options.default_logs_bucket_behavior
+# option, or (c) use either CLOUD_LOGGING_ONLY / NONE logging options".
+# CLOUD_LOGGING_ONLY sidesteps needing a GCS bucket at all — logs still show
+# up in Console → Cloud Build → History exactly as before, just backed by
+# Cloud Logging instead of a bucket.
+options:
+  logging: CLOUD_LOGGING_ONLY
+
 steps:
   # ---------------------------------------------------------------------
   # 1. Shared base stages, built once and reused by both service images.
