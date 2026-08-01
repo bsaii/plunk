@@ -345,6 +345,13 @@ IAM role on the Cloud Build service account. If a `docker build` step fails comp
 BuildKit note above). If `update-worker-pool` fails with something like "Invalid choice:
 'worker-pools'", your gcloud CLI needs the beta component — see the Worker Pool note above.
 
+If the build fails immediately (before any step even starts) with "if 'build.service_account' is
+specified, the build must either (a) specify 'build.logs_bucket', (b) use the
+REGIONAL_USER_OWNED_BUCKET ... option, or (c) use ... CLOUD_LOGGING_ONLY / NONE logging options" —
+your project assigns builds a non-default service account, and Cloud Build won't guess where logs
+go. `cloudbuild.yaml`'s `options.logging: CLOUD_LOGGING_ONLY` (top of the file) already handles
+this; if you still hit it, you're probably running an older copy of the file — pull latest.
+
 ## A note on scope
 
 This file does `api`, `web` and `worker`. `landing` and `wiki` aren't in `Dockerfile.services`
