@@ -6,6 +6,7 @@ import signale from 'signale';
 
 import {REDIS_URL} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
+import {getBullMqRedisOptions} from '../database/redis.js';
 
 /**
  * API Request Cleanup Worker
@@ -73,7 +74,7 @@ export function createApiRequestCleanupWorker(): Worker<ApiRequestCleanupJobData
   const redisConnection: RedisOptions = {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
-    ...parseRedisUrl(REDIS_URL),
+    ...getBullMqRedisOptions(REDIS_URL),
   };
 
   const worker = new Worker<ApiRequestCleanupJobData>('api-request-cleanup', processCleanup, {
@@ -94,14 +95,4 @@ export function createApiRequestCleanupWorker(): Worker<ApiRequestCleanupJobData
   });
 
   return worker;
-}
-
-function parseRedisUrl(url: string): {host: string; port: number; password?: string; db?: number} {
-  const urlObj = new URL(url);
-  return {
-    host: urlObj.hostname,
-    port: parseInt(urlObj.port || '6379', 10),
-    password: urlObj.password || undefined,
-    db: parseInt(urlObj.pathname.slice(1) || '0', 10),
-  };
 }
