@@ -1,8 +1,27 @@
 import {Redis} from 'ioredis';
+import type {RedisOptions} from 'ioredis';
 
 import {REDIS_URL} from '../app/constants.js';
 
 export const redis = new Redis(REDIS_URL + '?family=0');
+
+/**
+ * Builds ioredis connection options for BullMQ (Queue/Worker), which accept a
+ * plain options object rather than a URL string. Preserves the `rediss:` TLS
+ * scheme, which is otherwise silently dropped and causes the Redis server to
+ * reset the connection (ECONNRESET) when the provider requires TLS.
+ */
+export function getBullMqRedisOptions(url: string): RedisOptions {
+  const parsed = new URL(url);
+
+  return {
+    host: parsed.hostname,
+    port: parseInt(parsed.port || '6379', 10),
+    password: parsed.password || undefined,
+    db: parseInt(parsed.pathname.slice(1) || '0', 10),
+    ...(parsed.protocol === 'rediss:' ? {tls: {}} : {}),
+  };
+}
 
 export const REDIS_ONE_MINUTE = 60;
 export const REDIS_DEFAULT_EXPIRY = REDIS_ONE_MINUTE;
