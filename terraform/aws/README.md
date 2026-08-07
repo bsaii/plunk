@@ -22,6 +22,38 @@ CloudFront-only design here. That call is now guarded to only run for local Mini
 Set `S3_PUBLIC_URL` in the app's env config to the `cloudfront_domain_name` output below instead
 of a raw S3 endpoint.
 
+## S3 IAM user (runtime credentials)
+
+`iam.tf` creates the IAM user, least-privilege policy, and policy attachment Plunk uses at
+runtime to upload objects (`s3:PutObject`) and read bucket metadata (`s3:ListBucket`,
+`s3:GetBucketLocation` — `HeadBucket` works through `s3:ListBucket`). It's a separate IAM user
+from the existing SES one (managed outside Terraform): compromised storage credentials shouldn't
+be able to send email or touch SES identities, and compromised SES credentials shouldn't be able
+to read/write uploaded files.
+
+The policy deliberately excludes `s3:CreateBucket` and `s3:PutBucketPolicy` — Terraform owns
+those.
+
+The access key is **not** created by Terraform (`aws_iam_access_key` would put the secret access
+key in state). Create it manually after applying:
+
+```bash
+export PLUNK_S3_IAM_USER="$(terraform output -raw s3_iam_user_name)"
+
+aws iam list-access-keys --user-name "$PLUNK_S3_IAM_USER" \
+  --query 'AccessKeyMetadata[].{AccessKeyId:AccessKeyId,Status:Status,Created:CreateDate}' \
+  --output table
+
+# Only if the user has no existing key:
+aws iam create-access-key --user-name "$PLUNK_S3_IAM_USER" \
+  --query 'AccessKey.{AccessKeyId:AccessKeyId,SecretAccessKey:SecretAccessKey}' \
+  --output json
+```
+
+The secret access key is shown only once — copy both values straight into your secrets manager
+as `S3_ACCESS_KEY_ID` / `S3_ACCESS_KEY_SECRET`. Do not save them in the repo, `.tfvars`,
+Terraform outputs, or shell history.
+
 ## Usage
 
 Bucket names are global across all of AWS — `bucket_name` defaults to `bsaii-plunk-uploads`;
@@ -55,6 +87,9 @@ terraform apply ...
 | 5 | CloudFront distribution | `aws_cloudfront_distribution` | Data transfer out (per GB, varies by `cloudfront_price_class`) + request pricing — **primary cost driver** |
 | 6 | Origin Access Control | `aws_cloudfront_origin_access_control` | No charge |
 | 7 | Bucket policy (CloudFront-scoped) | `aws_s3_bucket_policy` | No charge |
+| 8 | S3 runtime IAM user | `aws_iam_user` | No charge |
+| 9 | S3 runtime IAM policy | `aws_iam_policy` | No charge |
+| 10 | S3 runtime IAM policy attachment | `aws_iam_user_policy_attachment` | No charge |
 
 `cloudfront_price_class` is the main lever to check against the pricing calculator:
 `PriceClass_100` (default here) serves from North America + Europe edge locations only;
