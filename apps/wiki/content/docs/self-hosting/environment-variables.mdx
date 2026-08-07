@@ -58,34 +58,39 @@ The bundled Docker setup includes Minio with defaults that work out of the box. 
 
 ### Using real AWS S3 instead of Minio
 
-Point the same variables at a real bucket instead of the bundled Minio service:
+`terraform/aws/` (repo root) provisions the recommended setup: a **private** S3 bucket fronted by
+CloudFront as the public endpoint (CloudFront gets read access via Origin Access Control, scoped
+to that one distribution — the bucket itself is never public). Point the app at the bucket and
+the Terraform-managed CloudFront domain:
 
 ```bash
 S3_ENDPOINT=https://s3.<your-bucket-region>.amazonaws.com
 S3_ACCESS_KEY_ID=<IAM access key>
 S3_ACCESS_KEY_SECRET=<IAM secret key>
 S3_BUCKET=<your-bucket-name>
-S3_PUBLIC_URL=https://<your-bucket-name>.s3.<your-bucket-region>.amazonaws.com
+S3_PUBLIC_URL=https://<cloudfront_domain_name output from terraform/aws/>
 S3_FORCE_PATH_STYLE=false
 S3_REGION=<your-bucket-region>
 ```
 
 `S3_FORCE_PATH_STYLE=false` and a matching `S3_REGION` both matter for real S3 — Minio doesn't
-care about either, but AWS's request signing does.
+care about either, but AWS's request signing does. `S3_FORCE_PATH_STYLE` also gates whether the
+app manages the bucket's public-read policy itself (see below) — leave it `false` for real AWS S3.
 
 Two things that are easy to miss:
 
-- **IAM permissions**: on startup the app calls `HeadBucket`/`CreateBucket`/`PutBucketPolicy` to
-  make sure the bucket exists and is publicly readable, plus `PutObject`/`GetObject` per upload.
-  If you pre-create the bucket yourself, you can scope the IAM policy down to just
-  `s3:GetObject`/`s3:PutObject`/`s3:HeadBucket` on that bucket and skip granting
-  `s3:CreateBucket`/`s3:PutBucketPolicy`.
-- **S3 Block Public Access**: new AWS buckets have this on by default, which silently rejects the
-  startup `PutBucketPolicy` call (the app logs a warning and keeps going rather than crashing).
-  The practical effect: uploaded files 403 for anyone opening `S3_PUBLIC_URL` in a browser or
-  email client. Either turn off Block Public Access for this bucket, or — better for a
-  production setup — put a CloudFront distribution in front of the bucket instead of making it
-  public directly, and set `S3_PUBLIC_URL` to the CloudFront domain.
+- **IAM permissions**: on startup the app calls `HeadBucket`/`CreateBucket` to make sure the
+  bucket exists, plus `PutObject`/`GetObject` per upload. It only calls `PutBucketPolicy` when
+  `S3_FORCE_PATH_STYLE=true` (Minio dev) — for real AWS S3 that call is skipped entirely, since
+  `terraform/aws/` owns the (CloudFront-scoped) bucket policy instead. If you pre-create the
+  bucket yourself (which `terraform/aws/` already does), scope the IAM policy down to
+  `s3:GetObject`/`s3:PutObject` on `<bucket-arn>/*` plus `s3:ListBucket` on the bucket itself
+  (`<bucket-arn>`, no `/*`) — `HeadBucket` is authorized by `s3:ListBucket`, there is no
+  `s3:HeadBucket` action — and skip granting `s3:CreateBucket`/`s3:PutBucketPolicy` entirely.
+- **S3 Block Public Access**: irrelevant with the `terraform/aws/` setup above, since the bucket
+  is never made public directly — `aws_s3_bucket_public_access_block` blocks all four settings and
+  CloudFront's Origin Access Control is the only path in. This only matters if you set the bucket
+  policy up by hand instead of using the provided Terraform.
 
 ## Attachments
 

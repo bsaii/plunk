@@ -147,15 +147,16 @@ default Cloud Run hostnames (`https://plunk-api-abc123-ew.a.run.app`) that produ
 — and because `run.app` is on the Public Suffix List, browsers silently drop the cookie. Login then
 appears to succeed and the dashboard immediately behaves as logged out.
 
-Map both services onto subdomains of a domain you control before using it for real:
-
-```bash
-gcloud beta run domain-mappings create --service=plunk-web \
-  --domain=app.example.com --region="$REGION"
-
-gcloud beta run domain-mappings create --service=plunk-api \
-  --domain=api.example.com --region="$REGION"
-```
+Map both services onto subdomains of a domain you control before using it for real. Direct Cloud
+Run domain mappings (`gcloud beta run domain-mappings create`) are still a Preview feature and
+Google does not recommend them for production — see
+[Mapping custom domains](https://cloud.google.com/run/docs/mapping-custom-domains). Instead, this
+repo provisions a **Global External Application Load Balancer** in front of both services via
+`terraform/gcp/` (`lb.tf`): a reserved global static IP, a Google-managed TLS certificate covering
+both hostnames, and host-based routing (serverless NEGs + backend services + URL map) that sends
+`api_domain` to `plunk-api` and `web_domain` to `plunk-web`. See that directory's README for the
+`terraform apply` steps and for the DNS `A` records to add at your registrar once the load
+balancer's IP is reserved.
 
 Then set `API_URI=https://api.example.com` and `DASHBOARD_URI=https://app.example.com` on **both**
 services (the shared `.example.com` cookie domain is what makes the session work across the two).

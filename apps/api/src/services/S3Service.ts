@@ -82,34 +82,40 @@ export async function initializeBucket(): Promise<void> {
     }
   }
 
-  // Set public read policy for the bucket (both for new and existing buckets)
-  try {
-    const bucketPolicy = {
-      Version: '2012-10-17',
-      Statement: [
-        {
-          Sid: 'PublicReadGetObject',
-          Effect: 'Allow',
-          Principal: '*',
-          Action: ['s3:GetObject'],
-          Resource: [`arn:aws:s3:::${S3_BUCKET}/*`],
-        },
-      ],
-    };
+  // Set public read policy for the bucket (both for new and existing buckets).
+  // Only for local Minio dev (S3_FORCE_PATH_STYLE=true) — on real AWS S3,
+  // terraform/aws/cdn.tf owns a CloudFront-scoped bucket policy instead, and
+  // this bucket is kept private. Setting a public Principal:"*" policy here
+  // for real S3 would fight that Terraform-managed policy on every restart.
+  if (S3_FORCE_PATH_STYLE) {
+    try {
+      const bucketPolicy = {
+        Version: '2012-10-17',
+        Statement: [
+          {
+            Sid: 'PublicReadGetObject',
+            Effect: 'Allow',
+            Principal: '*',
+            Action: ['s3:GetObject'],
+            Resource: [`arn:aws:s3:::${S3_BUCKET}/*`],
+          },
+        ],
+      };
 
-    await s3Client.send(
-      new PutBucketPolicyCommand({
-        Bucket: S3_BUCKET,
-        Policy: JSON.stringify(bucketPolicy),
-      }),
-    );
+      await s3Client.send(
+        new PutBucketPolicyCommand({
+          Bucket: S3_BUCKET,
+          Policy: JSON.stringify(bucketPolicy),
+        }),
+      );
 
-    if (!bucketExists) {
-      signale.info(`[S3] Set public read policy for bucket: ${S3_BUCKET}`);
+      if (!bucketExists) {
+        signale.info(`[S3] Set public read policy for bucket: ${S3_BUCKET}`);
+      }
+    } catch (policyError) {
+      signale.error('[S3] Failed to set bucket policy:', policyError);
+      // Don't throw - bucket was created but policy failed
     }
-  } catch (policyError) {
-    signale.error('[S3] Failed to set bucket policy:', policyError);
-    // Don't throw - bucket was created but policy failed
   }
 }
 
