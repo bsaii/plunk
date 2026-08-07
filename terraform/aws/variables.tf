@@ -1,7 +1,7 @@
 variable "bucket_name" {
-  description = "S3 bucket name for uploaded attachments/images. Matches S3_BUCKET in apps/api/.env.example (default 'uploads')."
+  description = "S3 bucket name for uploaded attachments/images. S3 bucket names are global across all of AWS, so this must be distinctive — not just 'uploads' (which S3_BUCKET defaults to for local Minio dev in apps/api/.env.example)."
   type        = string
-  default     = "uploads"
+  default     = "bsaii-plunk-uploads"
 }
 
 variable "region" {

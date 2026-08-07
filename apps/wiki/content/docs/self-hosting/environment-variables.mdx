@@ -83,9 +83,10 @@ Two things that are easy to miss:
   bucket exists, plus `PutObject`/`GetObject` per upload. It only calls `PutBucketPolicy` when
   `S3_FORCE_PATH_STYLE=true` (Minio dev) — for real AWS S3 that call is skipped entirely, since
   `terraform/aws/` owns the (CloudFront-scoped) bucket policy instead. If you pre-create the
-  bucket yourself, you can scope the IAM policy down to just
-  `s3:GetObject`/`s3:PutObject`/`s3:HeadBucket` on that bucket and skip granting
-  `s3:CreateBucket`/`s3:PutBucketPolicy`.
+  bucket yourself (which `terraform/aws/` already does), scope the IAM policy down to
+  `s3:GetObject`/`s3:PutObject` on `<bucket-arn>/*` plus `s3:ListBucket` on the bucket itself
+  (`<bucket-arn>`, no `/*`) — `HeadBucket` is authorized by `s3:ListBucket`, there is no
+  `s3:HeadBucket` action — and skip granting `s3:CreateBucket`/`s3:PutBucketPolicy` entirely.
 - **S3 Block Public Access**: irrelevant with the `terraform/aws/` setup above, since the bucket
   is never made public directly — `aws_s3_bucket_public_access_block` blocks all four settings and
   CloudFront's Origin Access Control is the only path in. This only matters if you set the bucket

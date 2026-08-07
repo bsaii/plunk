@@ -10,6 +10,14 @@ resource "aws_s3_bucket" "uploads" {
     environment = var.environment
     component   = "s3"
   }
+
+  # This bucket holds customer-uploaded attachments/images — an accidental
+  # `terraform destroy` (or a bucket_name change forcing replacement) must
+  # not silently delete it. Remove this only if you deliberately intend to
+  # destroy the bucket, e.g. tearing down a throwaway environment.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # Protects against accidental overwrite/delete of uploaded attachments.

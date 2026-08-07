@@ -10,19 +10,25 @@ Both are already configured manually today (SES for sending, SNS for the bounce/
 webhook at `POST /webhooks/sns`). Bringing them into Terraform is future work — not part of this
 change.
 
-## Required app-side follow-up
+## App-side change this Terraform depends on (already shipped in this PR)
 
-`apps/api/src/services/S3Service.ts`'s `initializeBucket()` currently calls
-`PutBucketPolicyCommand` unconditionally on every boot to set a **public**-read bucket policy.
-Left as-is, this would silently reopen the bucket to direct public access and defeat the
-CloudFront-only design here. That call needs to be guarded so it only runs for local Minio dev
-(`S3_FORCE_PATH_STYLE=true`) and is skipped for real AWS S3, where this Terraform now owns the
-(CloudFront-scoped) bucket policy.
+`apps/api/src/services/S3Service.ts`'s `initializeBucket()` previously called
+`PutBucketPolicyCommand` unconditionally on every boot to set a **public**-read bucket policy,
+which would have silently reopened this bucket to direct public access and defeated the
+CloudFront-only design here. That call is now guarded to only run for local Minio dev
+(`S3_FORCE_PATH_STYLE=true`) and is skipped for real AWS S3, where this Terraform owns the
+(CloudFront-scoped) bucket policy instead — see the diff in this PR.
 
-Once this ships, update `S3_PUBLIC_URL` in the relevant env config to the `cloudfront_domain_name`
-output instead of a raw S3 endpoint.
+Set `S3_PUBLIC_URL` in the app's env config to the `cloudfront_domain_name` output below instead
+of a raw S3 endpoint.
 
 ## Usage
+
+Bucket names are global across all of AWS — `bucket_name` defaults to `bsaii-plunk-uploads`;
+override it if that's taken or you want a different name per environment.
+
+State locking requires a DynamoDB table to already exist (see `versions.tf` for the exact
+`aws dynamodb create-table` command and the Terraform-1.10+ native-locking alternative).
 
 ```bash
 cd terraform/aws
@@ -30,9 +36,11 @@ cd terraform/aws
 terraform init \
   -backend-config="bucket=<your-terraform-state-bucket>" \
   -backend-config="key=plunk/aws/<environment>/terraform.tfstate" \
-  -backend-config="region=<state-bucket-region>"
+  -backend-config="region=<state-bucket-region>" \
+  -backend-config="dynamodb_table=plunk-terraform-locks"
 
-terraform plan -var="bucket_name=uploads" -var="region=us-east-1"
+terraform validate
+terraform plan -var="bucket_name=bsaii-plunk-uploads" -var="region=us-east-1"
 terraform apply ...
 ```
 
