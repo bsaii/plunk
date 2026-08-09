@@ -56,8 +56,14 @@ Terraform outputs, or shell history.
 
 ## Usage
 
-Bucket names are global across all of AWS — `bucket_name` defaults to `bsaii-plunk-uploads`;
-override it if that's taken or you want a different name per environment.
+Bucket names are global across all of AWS — `bucket_name` defaults to `bsaii-plunk-uploads` in
+`variables.tf`, but that name is already taken, so it does **not** match the real production
+bucket. Production always plans against the committed `production.tfvars`, which pins the actual
+bucket name (`bsaii-plunk-uploads-483528439217`) alongside `region`, `environment`, and
+`cloudfront_price_class`. Never `terraform plan`/`apply` against production with ad-hoc `-var`
+flags or with no var file — either falls back to the mismatched default and plans a destructive
+replacement of the S3 bucket and OAC (which `prevent_destroy` will then block, but you don't want
+to get that far). `production.tfvars` contains no credentials, so it's safe to commit.
 
 State locking requires a DynamoDB table to already exist (see `versions.tf` for the exact
 `aws dynamodb create-table` command and the Terraform-1.10+ native-locking alternative).
@@ -72,9 +78,13 @@ terraform init \
   -backend-config="dynamodb_table=plunk-terraform-locks"
 
 terraform validate
-terraform plan -var="bucket_name=bsaii-plunk-uploads" -var="region=us-east-1"
-terraform apply ...
+terraform plan -var-file=production.tfvars -out=production.tfplan
+terraform show -no-color production.tfplan   # confirm no bucket/OAC replacement before applying
+terraform apply production.tfplan
 ```
+
+For a new/non-production environment with its own bucket name, either add a matching
+`<environment>.tfvars` or pass `-var` flags explicitly — just don't do that against production.
 
 ## Resource inventory (for an AWS Pricing Calculator estimate)
 

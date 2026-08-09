@@ -48,7 +48,8 @@ robots.txt
 install-state.gz
 
 tsconfig.tsbuildinfo
-next-env.d.ts**/.terraform/
+next-env.d.ts
+**/.terraform/
 *.tfstate
 *.tfstate.*
 *.tfplan
