@@ -9,6 +9,12 @@ resource "aws_cloudfront_origin_access_control" "uploads" {
   signing_protocol                  = "sigv4"
 }
 
+# AWS-managed policy — avoids the legacy forwarded_values block, which the
+# CloudFront Free flat-rate plan does not support.
+data "aws_cloudfront_cache_policy" "caching_optimized" {
+  name = "Managed-CachingOptimized"
+}
+
 resource "aws_cloudfront_distribution" "uploads" {
   enabled     = true
   comment     = "Plunk uploads (public read endpoint for ${var.bucket_name})"
@@ -27,18 +33,7 @@ resource "aws_cloudfront_distribution" "uploads" {
     viewer_protocol_policy = "redirect-to-https"
     allowed_methods        = ["GET", "HEAD"]
     cached_methods         = ["GET", "HEAD"]
-
-    forwarded_values {
-      query_string = false
-
-      cookies {
-        forward = "none"
-      }
-    }
-
-    min_ttl     = 0
-    default_ttl = 86400
-    max_ttl     = 31536000
+    cache_policy_id        = data.aws_cloudfront_cache_policy.caching_optimized.id
   }
 
   restrictions {
