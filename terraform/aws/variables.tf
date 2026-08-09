@@ -33,3 +33,9 @@ variable "cloudfront_price_class" {
   type        = string
   default     = "PriceClass_100"
 }
+
+variable "cloudfront_web_acl_arn" {
+  description = "ARN of an AWS WAFv2 web ACL to associate with the distribution. Leave null for no WAF association. Must be a global (CLOUDFRONT scope) web ACL created in us-east-1 regardless of `region`."
+  type        = string
+  default     = null
+}

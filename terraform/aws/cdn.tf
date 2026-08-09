@@ -22,6 +22,8 @@ resource "aws_cloudfront_distribution" "uploads" {
 
   aliases = var.cdn_domain != null ? [var.cdn_domain] : []
 
+  web_acl_id = var.cloudfront_web_acl_arn
+
   origin {
     domain_name              = aws_s3_bucket.uploads.bucket_regional_domain_name
     origin_id                = "s3-${var.bucket_name}"

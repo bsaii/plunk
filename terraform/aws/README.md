@@ -86,6 +86,23 @@ terraform apply production.tfplan
 For a new/non-production environment with its own bucket name, either add a matching
 `<environment>.tfvars` or pass `-var` flags explicitly — just don't do that against production.
 
+### WAF association and price class (`production.tfvars`)
+
+Production's `cloudfront_price_class` is `PriceClass_All` and `cloudfront_web_acl_arn` points at
+an existing WAFv2 web ACL (`CreatedByCloudFront-e2444887`), matching state that was previously
+changed outside Terraform. **This was not independently verified against the AWS account** by
+whoever last edited `production.tfvars` — before trusting it, confirm directly:
+
+```bash
+aws wafv2 get-web-acl --scope CLOUDFRONT --region us-east-1 \
+  --name CreatedByCloudFront-e2444887 --id 40ed8f03-9dbd-43ea-9787-59e656e884aa
+aws cloudfront get-distribution-config --id <distribution-id>   # check WebACLId and PriceClass
+```
+
+If the ACL doesn't exist, isn't associated with the `uploads` distribution, or you don't recognize
+it, do not run `terraform apply` with these values — treat it as a signal to investigate the AWS
+account for unauthorized changes before proceeding.
+
 ## Resource inventory (for an AWS Pricing Calculator estimate)
 
 | # | Resource | Type | Notes |
