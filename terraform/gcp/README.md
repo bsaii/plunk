@@ -1,15 +1,22 @@
 # Plunk — GCP Terraform
 
-Manages `plunk-api`, `plunk-web`, the `plunk-migrate` Cloud Run Job, and the Global External
-HTTPS Load Balancer that fronts the two services with custom domains.
+Manages `plunk-api`, `plunk-web`, the `plunk-migrate` Cloud Run Job, the `plunk-worker` Cloud Run
+Worker Pool, and the Global External HTTPS Load Balancer that fronts the two services with custom
+domains — plus everything a brand-new GCP project needs before any of that can exist: the
+required APIs, the Artifact Registry repo, and every runtime/build service account and IAM
+binding (`services.tf` / `iam.tf`). Nothing here assumes resources that predate this Terraform;
+a fresh project with nothing deployed yet is the expected starting point.
 
 ## Division of labor with `cloudbuild.yaml`
 
 `cloudbuild.yaml` (repo root) still owns building and rolling out container images on every
-merge (`gcloud run deploy` / `gcloud run jobs update`). This Terraform owns everything else:
-scaling (`min_instance_count`), ingress, the load balancer, TLS, labels, and IAM. Each Cloud Run
-resource's `lifecycle.ignore_changes` on its image field is what keeps the two from fighting —
-`terraform apply` will never revert an image Cloud Build just deployed.
+merge (`gcloud run deploy` / `gcloud run jobs update` / `gcloud run worker-pools update`). This
+Terraform owns everything else: the APIs and Artifact Registry repo Cloud Build pushes into
+(`services.tf`), every service account and IAM grant Cloud Build and the Cloud Run resources
+themselves need (`iam.tf`), scaling (`min_instance_count`/`max_instance_count`), CPU/memory,
+ingress, the load balancer, TLS, and labels. Each Cloud Run resource's `lifecycle.ignore_changes`
+on its image field is what keeps the two from fighting — `terraform apply` will never revert an
+image Cloud Build just deployed.
 
 ## Why a load balancer instead of `gcloud run domain-mappings`
 
@@ -25,14 +32,40 @@ can no longer be reached directly via their `*.run.app` URL — only through the
 The `roles/run.invoker` → `allUsers` IAM binding stays in place (needed for the load balancer to
 invoke them; Plunk does its own app-level auth on top).
 
+## Prerequisites this Terraform provisions (`services.tf`, `iam.tf`)
+
+On a brand-new GCP project there is nothing to click through in the console first:
+
+- **`services.tf`** enables every required API (`run`, `artifactregistry`, `secretmanager`, `iam`,
+  `cloudbuild`, `compute`, `cloudresourcemanager`) with `disable_on_destroy = false`, and creates
+  the `plunk` Artifact Registry Docker repo that `cloudbuild.yaml` pushes `api`/`web`/`worker`
+  images into.
+- **`iam.tf`** creates a dedicated runtime service account per Cloud Run resource
+  (`plunk-api-run`, `plunk-web-run`, `plunk-migrate-run`, `plunk-worker-run`) instead of relying on
+  the shared per-project default compute service account, and grants each one
+  `roles/secretmanager.secretAccessor` scoped to exactly the secrets its own `*_secret_env_vars`
+  map references — required for Cloud Run to resolve a `secret_key_ref` env var at container
+  start (see [Google's secret access requirement](https://cloud.google.com/run/docs/configuring/secrets#access-secret)).
+  It also grants the **existing** Cloud Build service account
+  (`plunk-cloud-build@<project>.iam.gserviceaccount.com` — a user-managed account per Google's
+  current recommendation, not the legacy `PROJECT_NUMBER@cloudbuild.gserviceaccount.com` default;
+  see `docs/deploy-cloud-build.md`) `roles/run.admin`, `roles/logging.logWriter`, repo-scoped
+  `roles/artifactregistry.writer`, and `roles/iam.serviceAccountUser` on each runtime service
+  account individually. The Cloud Build service account itself is **not** created here — it must
+  already exist; this file only grants it IAM roles.
+
 ## Labels
 
-Every resource gets two labels:
+Every Cloud Run service/job/worker-pool resource gets two labels (`api.tf`, `web.tf`,
+`migrate.tf`, `worker.tf`); the Artifact Registry repo (`services.tf`) gets the `environment`
+label alone. IAM resources (service accounts, IAM bindings) and the load balancer's networking
+resources (`lb.tf`) do **not** carry these labels — Cloud IAM resources don't support labels at
+all, and the LB pieces were a deliberate scope decision, not an oversight:
 
 | Label | Value | Purpose |
 | --- | --- | --- |
 | `environment` | `var.environment` | Separates cost/queries per environment if this project ever hosts more than one (production, staging, ...). |
-| `component` | `api` / `web` / `migrate` | Breaks down Cloud Billing cost reports and `gcloud ... --filter="labels.component=api"` queries per piece of infrastructure instead of one lump sum. |
+| `component` | `api` / `web` / `migrate` / `worker` | Breaks down Cloud Billing cost reports and `gcloud ... --filter="labels.component=api"` queries per piece of infrastructure instead of one lump sum. |
 
 ## Usage
 
@@ -43,20 +76,32 @@ terraform init \
   -backend-config="bucket=<your-terraform-state-bucket>" \
   -backend-config="prefix=plunk/gcp/<environment>"
 
-terraform plan \
-  -var="project_id=<your-project-id>" \
-  -var="api_domain=plunk-api.example.com" \
-  -var="web_domain=plunk-app.example.com"
-
-terraform apply ...
+terraform plan -var-file=production.tfvars -out=production.tfplan
+terraform show -no-color production.tfplan   # review before applying — first apply creates
+                                              # every resource in this directory from scratch
+terraform apply production.tfplan
 ```
 
-Non-secret env vars go in `api_env_vars` / `web_env_vars` / `migrate_env_vars` (plain maps).
-Secret values (`JWT_SECRET`, `DATABASE_URL`, AWS keys, etc.) go in `api_secret_env_vars` /
-`web_secret_env_vars` / `migrate_secret_env_vars` as `{ ENV_VAR_NAME = "secret-manager-secret-id" }`
-— Terraform only ever references the secret by name (always version `latest`), so no secret
-value enters `.tf`/`.tfvars` files or Terraform state. The referenced secrets must already exist
-in Secret Manager.
+`production.tfvars` pins `project_id`, `api_domain`/`web_domain`, explicit CPU/memory/max-instance
+sizing per component, and the non-secret/secret env var maps — see that file's comments. For a
+new/non-production environment, add a matching `<environment>.tfvars` rather than passing ad-hoc
+`-var` flags (same reasoning as `terraform/aws/README.md`'s equivalent section).
+
+Non-secret env vars go in `api_env_vars` / `web_env_vars` / `migrate_env_vars` / `worker_env_vars`
+(plain maps). Secret values (`JWT_SECRET`, `DATABASE_URL`, AWS keys, etc.) go in
+`api_secret_env_vars` / `web_secret_env_vars` / `migrate_secret_env_vars` / `worker_secret_env_vars`
+as `{ ENV_VAR_NAME = "secret-manager-secret-id" }` — Terraform only ever references the secret by
+name (always version `latest`), so no secret value enters `.tf`/`.tfvars` files or Terraform
+state. The referenced secrets must already exist in Secret Manager; `iam.tf` grants each runtime
+service account access to exactly the ones its own map references.
+
+### `.terraform.lock.hcl`
+
+Not committed yet — unlike `terraform/aws`, this lock file couldn't be generated in the
+environment this Terraform was authored in (no route to `registry.terraform.io` to download the
+`hashicorp/google` provider and hash it). Run `terraform init` once from an environment with
+normal internet access and commit the `.terraform.lock.hcl` it produces before the first real
+`apply`, exactly like `terraform/aws/.terraform.lock.hcl`.
 
 ## After `apply`: DNS and certificate provisioning
 
@@ -73,27 +118,36 @@ in Secret Manager.
 
 | # | Resource | Type | Notes |
 | --- | --- | --- | --- |
-| 1 | `plunk-api` | Cloud Run v2 service | `min_instance_count=1` — at least one instance billed continuously (CPU+memory), plus per-request beyond that |
-| 2 | `plunk-web` | Cloud Run v2 service | `min_instance_count=0` — billed only while serving requests (scale-to-zero) |
+| 1 | `plunk-api` | Cloud Run v2 service | `min_instance_count=1`, `1 vCPU`/`512Mi` by default — at least one instance billed continuously (CPU+memory), plus per-request beyond that |
+| 2 | `plunk-web` | Cloud Run v2 service | `min_instance_count=0`, `1 vCPU`/`512Mi` by default — billed only while serving requests (scale-to-zero) |
 | 3 | `plunk-migrate` | Cloud Run v2 Job | Billed only on manual execution; effectively $0 at rest |
-| 4 | `plunk-lb-ip` | Global static external IP | Small hourly reservation charge (Premium tier) |
-| 5 | `plunk-cert` | Managed SSL certificate | No direct charge |
-| 6 | `plunk-api-neg`, `plunk-web-neg` | Serverless NEGs (x2) | No direct charge (routing config only) |
-| 7 | `plunk-api-backend`, `plunk-web-backend` | Backend services (x2) | No direct charge; LB request/data-processing charges apply at the forwarding-rule level |
-| 8 | `plunk-lb`, `plunk-http-redirect` | URL maps (x2) | No direct charge |
-| 9 | `plunk-https-proxy`, `plunk-http-proxy` | Target proxies (x2) | No direct charge |
-| 10 | `plunk-https`, `plunk-http` | Global forwarding rules (x2) | **Primary load balancer cost driver**: hourly forwarding-rule charge + per-GB data-processing charge |
-| 11 | IAM invoker bindings | `google_cloud_run_v2_service_iam_member` (x2) | No charge |
-| 12 | Secret Manager secret access | References only — secrets pre-exist | Per-access-op charges only, negligible at this scale |
+| 4 | `plunk-worker` | Cloud Run v2 Worker Pool | `min_instance_count=1`, `1 vCPU`/`512Mi` by default — always-on, no request-based tier (no HTTP entrypoint); ≈$62–68/month baseline for the one always-on instance at current Tier-1 rates, verify against the calculator; bump `worker_memory` if queue processing needs more headroom |
+| 5 | `plunk` Artifact Registry repo | Docker repo | Storage (per GB of stored image layers) + minor egress; no direct charge for the repo itself |
+| 6 | `plunk-lb-ip` | Global static external IP | Small hourly reservation charge (Premium tier) |
+| 7 | `plunk-cert` | Managed SSL certificate | No direct charge |
+| 8 | `plunk-api-neg`, `plunk-web-neg` | Serverless NEGs (x2) | No direct charge (routing config only) |
+| 9 | `plunk-api-backend`, `plunk-web-backend` | Backend services (x2) | No direct charge; LB request/data-processing charges apply at the forwarding-rule level |
+| 10 | `plunk-lb`, `plunk-http-redirect` | URL maps (x2) | No direct charge |
+| 11 | `plunk-https-proxy`, `plunk-http-proxy` | Target proxies (x2) | No direct charge |
+| 12 | `plunk-https`, `plunk-http` | Global forwarding rules (x2) | **Primary load balancer cost driver**: hourly forwarding-rule charge + per-GB data-processing charge |
+| 13 | Runtime service accounts (x4) + Cloud Build IAM bindings | `google_service_account`, `google_*_iam_member` | No charge — IAM has no usage-based cost |
+| 14 | IAM invoker bindings | `google_cloud_run_v2_service_iam_member` (x2) | No charge |
+| 15 | Secret Manager secret access | References only — secrets pre-exist | Per-access-op charges only, negligible at this scale |
 
-The two biggest cost levers to check against the pricing calculator before applying: `plunk-api`
-running with `min_instance_count=1` (always-on CPU/memory), and the load balancer's forwarding
-rules (billed hourly regardless of traffic, plus per-GB processed).
+The three biggest cost levers to check against the pricing calculator before applying: `plunk-api`
+and `plunk-worker` both running with `min_instance_count=1` (always-on CPU/memory each), and the
+load balancer's forwarding rules (billed hourly regardless of traffic, plus per-GB processed).
 
 ## Out of scope
 
-- The BullMQ worker's Cloud Run Worker Pool — dropped from both Cloud Build and this Terraform;
-  its deployment strategy is a separate, currently-undecided piece of work.
 - DNS record management (Namecheap or otherwise) — stays a manual step, see above.
 - `landing` / `wiki` domains and services — not yet built in `Dockerfile.services` or wired into
   `cloudbuild.yaml`, so not in this Terraform either.
+- The Cloud Build service account's own creation (`gcloud iam service-accounts create
+  plunk-cloud-build`) — `iam.tf` grants it IAM roles but does not create the account itself, since
+  it's expected to already exist (see `docs/deploy-cloud-build.md`).
+- Importing pre-existing `plunk-api`/`plunk-web`/`plunk-migrate` resources from an older, non-
+  Terraform-managed deployment — this Terraform assumes a project where nothing has been deployed
+  yet. If you're retrofitting it onto a project that already has these resources, `terraform
+  import` each one before your first `apply`, or `terraform apply` will try to create duplicates
+  and fail on the name collision.

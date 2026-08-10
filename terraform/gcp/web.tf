@@ -14,10 +14,23 @@ resource "google_cloud_run_v2_service" "web" {
   template {
     scaling {
       min_instance_count = 0
+      max_instance_count = var.web_max_instance_count
     }
+
+    # Dedicated runtime identity (iam.tf) — grants exactly the Secret Manager
+    # access this service needs instead of the shared per-project default
+    # compute service account.
+    service_account = google_service_account.web.email
 
     containers {
       image = var.web_image
+
+      resources {
+        limits = {
+          cpu    = var.web_cpu
+          memory = var.web_memory
+        }
+      }
 
       ports {
         container_port = 8080
