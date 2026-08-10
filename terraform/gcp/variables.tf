@@ -203,14 +203,8 @@ variable "worker_memory" {
   default     = "512Mi"
 }
 
-variable "worker_min_instance_count" {
-  description = "Minimum plunk-worker instance count. Kept at 1 by default — unlike plunk-web, the BullMQ worker has no HTTP entrypoint to cold-start on, so scaling to zero means queued jobs simply wait until an instance is scaled back up."
+variable "worker_instance_count" {
+  description = "Fixed instance count for plunk-worker (manual scaling — see worker.tf's scaling block). Kept at 1 by default — unlike plunk-web, the BullMQ worker has no HTTP entrypoint to cold-start on, so scaling to zero means queued jobs simply wait until an instance is scaled back up. Raise this by hand if queue throughput needs more than one instance; Worker Pools do not autoscale on load the way a Cloud Run service does."
   type        = number
   default     = 1
-}
-
-variable "worker_max_instance_count" {
-  description = "Maximum autoscaled instance count for plunk-worker."
-  type        = number
-  default     = 3
 }

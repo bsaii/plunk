@@ -5,19 +5,25 @@
 # https://docs.cloud.google.com/run/docs/configuring/workerpools/containers.
 # Previously dropped from both cloudbuild.yaml and this Terraform as
 # "TBD" (see git history); restored now that Worker Pools have direct
-# Terraform support (google provider >= 6.29, see versions.tf).
+# Terraform support (google provider >= 6.37, see versions.tf).
 #
-# min_instance_count defaults to 1 (see variables.tf) rather than 0: unlike
-# plunk-web, there is no HTTP request to trigger a cold start on — scaling to
-# zero would just leave queued email/campaign/workflow jobs waiting until an
-# instance comes back. Same lifecycle.ignore_changes pattern as
-# api.tf/web.tf/migrate.tf: cloudbuild.yaml's `update-worker-pool` step keeps
-# rolling the image forward independently of Terraform.
+# worker_instance_count defaults to 1 (see variables.tf) rather than 0:
+# unlike plunk-web, there is no HTTP request to trigger a cold start on —
+# scaling to zero would just leave queued email/campaign/workflow jobs
+# waiting until an instance comes back. Same lifecycle.ignore_changes
+# pattern as api.tf/web.tf/migrate.tf: cloudbuild.yaml's
+# `update-worker-pool` step keeps rolling the image forward independently
+# of Terraform.
 #
-# NOTE: google_cloud_run_v2_worker_pool is a newer resource (GA in provider
-# ~6.29). Run `terraform validate` / `terraform plan` against a real registry
-# mirror before applying — verify this shape against the current provider
-# docs first if it's been a while since this file was last touched.
+# `scaling` is a top-level field on this resource (a sibling of `template`,
+# NOT nested inside it — unlike google_cloud_run_v2_service/_job, whose
+# scaling lives under template.scaling). manual_instance_count +
+# scaling_mode = "MANUAL" (the provider's own default) is used deliberately
+# instead of min/max_instance_count: see
+# https://docs.cloud.google.com/run/docs/deploy-worker-pools and the
+# provider schema (resource_cloud_run_v2_worker_pool.go) — MANUAL is the
+# well-supported mode; AUTOMATIC scaling_mode exists in the schema but is
+# not something this config relies on.
 resource "google_cloud_run_v2_worker_pool" "worker" {
   name     = "plunk-worker"
   project  = var.project_id
@@ -27,16 +33,16 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
     component = "worker"
   })
 
+  scaling {
+    scaling_mode          = "MANUAL"
+    manual_instance_count = var.worker_instance_count
+  }
+
   template {
     # Dedicated runtime identity (iam.tf) — grants exactly the Secret
     # Manager access the worker needs instead of the shared per-project
     # default compute service account.
     service_account = google_service_account.worker.email
-
-    scaling {
-      min_instance_count = var.worker_min_instance_count
-      max_instance_count = var.worker_max_instance_count
-    }
 
     containers {
       image = var.worker_image
@@ -81,4 +87,13 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
       template[0].containers[0].image,
     ]
   }
+
+  # The secret_key_ref values above are plain strings from
+  # var.worker_secret_env_vars — Terraform sees no attribute reference to
+  # google_secret_manager_secret_iam_member.worker, so there is no implicit
+  # dependency edge between them. Without this, Terraform is free to deploy
+  # this revision before granting the runtime service account
+  # roles/secretmanager.secretAccessor, and the container fails to start
+  # (permission denied resolving the secret) on a first/concurrent apply.
+  depends_on = [google_secret_manager_secret_iam_member.worker]
 }

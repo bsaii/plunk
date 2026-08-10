@@ -37,12 +37,26 @@ web_max_instance_count = 10
 migrate_cpu    = "1"
 migrate_memory = "512Mi"
 
-worker_cpu                = "1"
-worker_memory             = "512Mi"
-worker_min_instance_count = 1
-worker_max_instance_count = 3
+worker_cpu            = "1"
+worker_memory         = "512Mi"
+worker_instance_count = 1
 
 # --- Non-secret environment variables -----------------------------------
+# AWS_SES_REGION has no default in apps/api/src/app/constants.ts
+# (validateEnv('AWS_SES_REGION') with no fallback) — omitting it crashes
+# api/worker at boot. Replace "us-east-1" below if your SES identities live
+# in a different region.
+#
+# S3_* values point the API at the real CloudFront-fronted bucket from
+# terraform/aws (see that directory's production.tfvars /
+# apps/api/src/services/S3Service.ts) instead of falling back to
+# constants.ts's Minio-dev defaults (S3_ENDPOINT=http://minio:9000,
+# S3_BUCKET=uploads, S3_FORCE_PATH_STYLE=true) — the last of those matters
+# most: leaving it at the true/Minio default makes the API try to set a
+# PUBLIC bucket policy on a real AWS S3 bucket at startup, fighting the
+# private, CloudFront-scoped policy terraform/aws manages. Replace
+# S3_PUBLIC_URL with the real `cloudfront_domain_name` output from
+# terraform/aws once that stack has been applied.
 
 api_env_vars = {
   NODE_ENV      = "production"
@@ -50,6 +64,16 @@ api_env_vars = {
   DASHBOARD_URI = "https://next-app.useplunk.com"
   LANDING_URI   = "https://www.useplunk.com"
   WIKI_URI      = "https://docs.useplunk.com"
+
+  AWS_SES_REGION                    = "us-east-1"
+  SES_CONFIGURATION_SET             = "plunk-configuration-set"
+  SES_CONFIGURATION_SET_NO_TRACKING = "plunk-configuration-set-no-tracking"
+
+  S3_ENDPOINT         = "https://s3.us-east-1.amazonaws.com"
+  S3_REGION           = "us-east-1"
+  S3_BUCKET           = "bsaii-plunk-uploads-483528439217"
+  S3_PUBLIC_URL       = "https://REPLACE_WITH_terraform_output_cloudfront_domain_name"
+  S3_FORCE_PATH_STYLE = "false"
 }
 
 web_env_vars = {
@@ -63,16 +87,22 @@ migrate_env_vars = {
   NODE_ENV = "production"
 }
 
-# Worker env vars are a SUBSET of the API's — see docs/deploy-cloud-build.md's
-# "Worker environment variables" section for exactly which ones and why
-# (S3_*, OAuth, Stripe price IDs, etc. are HTTP-only and never imported by
-# the worker's code path).
+# Worker env vars are a SUBSET of the API's — S3_*, OAuth, Stripe price IDs,
+# etc. are HTTP-only and never imported by the worker's code path (see
+# docs/deploy-cloud-build.md's "Worker environment variables" section) — but
+# AWS_SES_REGION is NOT optional here either: apps/api/src/jobs/worker.ts
+# imports the same constants.ts, so the worker crashes at boot without it
+# too.
 worker_env_vars = {
   NODE_ENV      = "production"
   API_URI       = "https://next-api.useplunk.com"
   DASHBOARD_URI = "https://next-app.useplunk.com"
   LANDING_URI   = "https://www.useplunk.com"
   WIKI_URI      = "https://docs.useplunk.com"
+
+  AWS_SES_REGION                    = "us-east-1"
+  SES_CONFIGURATION_SET             = "plunk-configuration-set"
+  SES_CONFIGURATION_SET_NO_TRACKING = "plunk-configuration-set-no-tracking"
 }
 
 # --- Secret environment variables ---------------------------------------
@@ -83,6 +113,12 @@ worker_env_vars = {
 # iam.tf grants each runtime service account roles/secretmanager.secretAccessor
 # scoped to exactly the secrets referenced below — nothing broader.
 
+# STRIPE_SK / STRIPE_WEBHOOK_SECRET are OPTIONAL (constants.ts defaults both
+# to "" and gates STRIPE_ENABLED on them being non-empty — billing features
+# just stay off without them). Referencing them below means Terraform will
+# require plunk-stripe-sk / plunk-stripe-webhook-secret to already exist in
+# Secret Manager. If Stripe billing isn't wired up for this deployment yet,
+# delete these two lines rather than pre-creating throwaway secrets.
 api_secret_env_vars = {
   JWT_SECRET                = "plunk-jwt-secret"
   DATABASE_URL              = "plunk-database-url"

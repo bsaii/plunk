@@ -65,6 +65,10 @@ resource "google_cloud_run_v2_service" "web" {
       template[0].containers[0].image,
     ]
   }
+
+  # See api.tf for why this explicit dependency is needed — Terraform has no
+  # implicit edge to the Secret Manager IAM grant otherwise.
+  depends_on = [google_secret_manager_secret_iam_member.web]
 }
 
 resource "google_cloud_run_v2_service_iam_member" "web_public" {
