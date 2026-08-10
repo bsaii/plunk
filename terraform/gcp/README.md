@@ -2,11 +2,12 @@
 
 Manages `plunk-api`, `plunk-web`, the `plunk-migrate` Cloud Run Job, the `plunk-worker` Cloud Run
 Worker Pool, and the Global External HTTPS Load Balancer that fronts the two services with custom
-domains — plus everything a brand-new GCP project needs before any of that can exist: the
-required APIs, the Artifact Registry repo, and every runtime/build service account and IAM
-binding (`services.tf` / `iam.tf`). Written for a fresh project with nothing deployed yet — if
-`plunk-api`/`plunk-web`/`plunk-migrate`/the Artifact Registry repo already exist in your target
-project, see "If ... already exist" under Usage below before running `terraform apply`.
+domains — plus everything the brand-new GCP project this targets needs before any of that can
+exist: the required APIs, the Artifact Registry repo, and every runtime/build service account and
+IAM binding (`services.tf` / `iam.tf`). Nothing in this project has been deployed yet — every
+`google_cloud_run_v2_*`/`google_artifact_registry_repository` resource here is a first-time
+`create`, not an update to something already running, so no `terraform import` step is needed
+before the first `apply`.
 
 ## Division of labor with `cloudbuild.yaml`
 
@@ -104,61 +105,6 @@ environment this Terraform was authored in (no route to `registry.terraform.io` 
 normal internet access and commit the `.terraform.lock.hcl` it produces before the first real
 `apply`, exactly like `terraform/aws/.terraform.lock.hcl`.
 
-### If `plunk-api`/`plunk-web`/`plunk-migrate` (or the `plunk` Artifact Registry repo) already exist
-
-This Terraform is written for a project where none of it has been deployed yet — the default
-assumption throughout this README. **Before your first `apply`, confirm which case you're in**:
-
-```bash
-gcloud artifacts repositories describe plunk --location=us-central1 --project=<your-project-id>
-gcloud run services list --region=us-central1 --project=<your-project-id>
-gcloud run jobs list --region=us-central1 --project=<your-project-id>
-gcloud run worker-pools list --region=us-central1 --project=<your-project-id>
-```
-
-If any of those come back non-empty, do **not** run `terraform apply` yet — it would try to
-*create* a resource with a name that already exists and fail on the collision. Import each one
-that already exists first:
-
-```bash
-cd terraform/gcp
-
-terraform import -var-file=production.tfvars \
-  google_artifact_registry_repository.plunk \
-  "projects/<your-project-id>/locations/us-central1/repositories/plunk"
-
-terraform import -var-file=production.tfvars \
-  google_cloud_run_v2_service.api \
-  "projects/<your-project-id>/locations/us-central1/services/plunk-api"
-
-terraform import -var-file=production.tfvars \
-  google_cloud_run_v2_service.web \
-  "projects/<your-project-id>/locations/us-central1/services/plunk-web"
-
-terraform import -var-file=production.tfvars \
-  google_cloud_run_v2_job.migrate \
-  "projects/<your-project-id>/locations/us-central1/jobs/plunk-migrate"
-
-# Only if plunk-worker already exists too — most first-time setups won't have this yet
-# (the worker was previously undeployed/TBD, see git history):
-terraform import -var-file=production.tfvars \
-  google_cloud_run_v2_worker_pool.worker \
-  "projects/<your-project-id>/locations/us-central1/workerPools/plunk-worker"
-```
-
-Then `terraform plan` and read the diff carefully before applying — importing only makes
-Terraform aware of the resource's *current* state; it does not by itself change anything.
-
-**If `plunk-api`/`plunk-web` are live and serving real traffic when you import them**, the plan
-will include flipping `ingress` from whatever it is today to
-`INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER` (see "Why a load balancer" above) — that cuts off the
-direct `*.run.app` URL the moment it applies. Don't apply that change until the load balancer's
-DNS records are live and `ssl_certificate_status` reads `ACTIVE` (see "After apply" below),
-or traffic on the old URL breaks before the new path is ready. Practically: apply everything
-*except* the ingress flip first (`terraform apply -target=... ` for the non-ingress resources, or
-temporarily hardcode `ingress = "INGRESS_TRAFFIC_ALL"` and revert once DNS/cert are confirmed),
-then cut over.
-
 ## After `apply`: DNS and certificate provisioning
 
 1. Read the `load_balancer_ip` output.
@@ -203,7 +149,5 @@ regardless of traffic, plus per-GB processed).
 - The Cloud Build service account's own creation (`gcloud iam service-accounts create
   plunk-cloud-build`) — `iam.tf` grants it IAM roles but does not create the account itself, since
   it's expected to already exist (see `docs/deploy-cloud-build.md`).
-- Automatically detecting and importing pre-existing `plunk-api`/`plunk-web`/`plunk-migrate`/
-  `plunk-worker`/Artifact Registry resources — this Terraform assumes a project where nothing has
-  been deployed yet; see "If ... already exist" under Usage above for the manual check + import
-  commands if that assumption doesn't hold for your project.
+- Importing pre-existing resources — not applicable. This targets a brand-new GCP project with
+  nothing deployed yet, so there is nothing to import.
