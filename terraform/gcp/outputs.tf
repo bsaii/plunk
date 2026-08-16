@@ -1,10 +1,10 @@
 output "api_url" {
-  description = "Direct Cloud Run URL for plunk-api. Not reachable from the internet once ingress is LB-only — informational / for debugging via the console only."
+  description = "Direct *.run.app URL for plunk-api. Publicly reachable (ingress is INGRESS_TRAFFIC_ALL) alongside api_domain — useful for debugging without going through Cloudflare."
   value       = google_cloud_run_v2_service.api.uri
 }
 
 output "web_url" {
-  description = "Direct Cloud Run URL for plunk-web. Not reachable from the internet once ingress is LB-only — informational / for debugging via the console only."
+  description = "Direct *.run.app URL for plunk-web. Publicly reachable (ingress is INGRESS_TRAFFIC_ALL) alongside web_domain — useful for debugging without going through Cloudflare."
   value       = google_cloud_run_v2_service.web.uri
 }
 
@@ -48,12 +48,12 @@ output "worker_service_account_email" {
   value       = google_service_account.worker.email
 }
 
-output "load_balancer_ip" {
-  description = "Reserved global static IP. Add this as an A record for both api_domain and web_domain at your DNS registrar."
-  value       = google_compute_global_address.plunk_lb_ip.address
+output "api_domain_mapping_records" {
+  description = "DNS records Cloud Run expects for api_domain (dns.tf) — add these at Cloudflare (proxied/orange-cloud) rather than at a registrar. Typically one CNAME to ghs.googlehosted.com for a subdomain, or multiple A/AAAA records for an apex domain. Empty/incomplete until Google has verified domain ownership and provisioned the mapping — re-run `terraform refresh` or check `gcloud run domain-mappings describe` if this comes back empty right after apply."
+  value       = google_cloud_run_domain_mapping.api.status
 }
 
-output "ssl_certificate_name" {
-  description = "Name of the managed SSL certificate. The hashicorp/google provider does not expose provisioning status as a resource attribute (there is no `managed[0].status` on google_compute_managed_ssl_certificate) — check it with: gcloud compute ssl-certificates describe <this output> --format='value(managed.status,managed.domainStatus)'. Stays PROVISIONING until DNS for both domains resolves to load_balancer_ip."
-  value       = google_compute_managed_ssl_certificate.plunk_cert.name
+output "web_domain_mapping_records" {
+  description = "Same as api_domain_mapping_records, for web_domain."
+  value       = google_cloud_run_domain_mapping.web.status
 }

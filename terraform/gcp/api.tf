@@ -1,12 +1,14 @@
 # plunk-api — min_instance_count = 1 so there is always a warm instance (no
-# cold starts, and a stable identity for the load balancer's health checks).
-# Reachable only through the load balancer in lb.tf, never directly via its
-# *.run.app URL (see ingress below).
+# cold starts). Public internet ingress: Cloudflare proxies api_domain
+# straight to this service (see dns.tf's domain mapping) rather than routing
+# through a GCP load balancer, so this can't be restricted to
+# INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER — there is no GCP-internal path from
+# Cloudflare's edge to Cloud Run.
 resource "google_cloud_run_v2_service" "api" {
   name     = "plunk-api"
   project  = var.project_id
   location = var.region
-  ingress  = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  ingress  = "INGRESS_TRAFFIC_ALL"
 
   labels = merge(local.common_labels, {
     component = "api"
@@ -79,10 +81,10 @@ resource "google_cloud_run_v2_service" "api" {
   depends_on = [google_secret_manager_secret_iam_member.api]
 }
 
-# Equivalent of today's `--allow-unauthenticated`: the load balancer's
-# serverless NEG needs to invoke the service, and Plunk does its own
-# app-level auth on top. Ingress above still restricts *where* requests can
-# originate from (LB-only), so this does not reopen direct *.run.app access.
+# Equivalent of today's `--allow-unauthenticated`: with ingress open to the
+# public internet (Cloudflare has no GCP identity to authenticate as),
+# unauthenticated invocation must be allowed at the IAM layer instead —
+# Plunk does its own app-level auth on top.
 resource "google_cloud_run_v2_service_iam_member" "api_public" {
   project  = var.project_id
   location = google_cloud_run_v2_service.api.location

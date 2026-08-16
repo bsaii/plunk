@@ -1,11 +1,13 @@
 # plunk-web — no min instances: the dashboard is stateless and fine scaling
 # to zero (a cold start costs a few seconds on the first request after idle).
-# Reachable only through the load balancer, same as plunk-api.
+# Public internet ingress, same reasoning as plunk-api (see that file) —
+# Cloudflare proxies web_domain straight to this service via dns.tf's domain
+# mapping instead of a GCP load balancer.
 resource "google_cloud_run_v2_service" "web" {
   name     = "plunk-web"
   project  = var.project_id
   location = var.region
-  ingress  = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  ingress  = "INGRESS_TRAFFIC_ALL"
 
   labels = merge(local.common_labels, {
     component = "web"
