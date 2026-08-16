@@ -118,10 +118,10 @@ worker_env_vars = {
 
 # STRIPE_SK / STRIPE_WEBHOOK_SECRET are OPTIONAL (constants.ts defaults both
 # to "" and gates STRIPE_ENABLED on them being non-empty — billing features
-# just stay off without them). Referencing them below means Terraform will
-# require plunk-stripe-sk / plunk-stripe-webhook-secret to already exist in
-# Secret Manager. If Stripe billing isn't wired up for this deployment yet,
-# delete these two lines rather than pre-creating throwaway secrets.
+# just stay off without them). Not wired up for this deployment, so they're
+# deliberately absent below rather than pointing at throwaway secrets — add
+# STRIPE_SK/STRIPE_WEBHOOK_SECRET back (with real Secret Manager IDs created
+# first) if billing gets turned on later.
 api_secret_env_vars = {
   JWT_SECRET                = "plunk-jwt-secret"
   DATABASE_URL              = "plunk-database-url"
@@ -131,8 +131,6 @@ api_secret_env_vars = {
   AWS_SES_SECRET_ACCESS_KEY = "plunk-ses-secret-access-key" # (from AWS)
   S3_ACCESS_KEY_ID          = "plunk-s3-access-key-id"      # (from AWS)
   S3_ACCESS_KEY_SECRET      = "plunk-s3-access-key-secret"  # (from AWS)
-  STRIPE_SK                 = "plunk-stripe-sk"
-  STRIPE_WEBHOOK_SECRET     = "plunk-stripe-webhook-secret"
 }
 
 # The dashboard is a pure frontend (no DB/Redis/S3 credentials — see
