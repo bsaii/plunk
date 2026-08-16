@@ -9,6 +9,9 @@ resource "google_cloud_run_v2_service" "web" {
   location = var.region
   ingress  = "INGRESS_TRAFFIC_ALL"
 
+  # See api.tf for why this is off during bootstrap.
+  deletion_protection = false
+
   labels = merge(local.common_labels, {
     component = "web"
   })

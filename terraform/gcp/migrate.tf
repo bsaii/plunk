@@ -9,6 +9,9 @@ resource "google_cloud_run_v2_job" "migrate" {
   project  = var.project_id
   location = var.region
 
+  # See api.tf for why this is off during bootstrap.
+  deletion_protection = false
+
   labels = merge(local.common_labels, {
     component = "migrate"
   })
@@ -64,7 +67,7 @@ resource "google_cloud_run_v2_job" "migrate" {
     ]
   }
 
-  # See api.tf for why this explicit dependency is needed — Terraform has no
-  # implicit edge to the Secret Manager IAM grant otherwise.
-  depends_on = [google_secret_manager_secret_iam_member.migrate]
+  # See api.tf for why this depends on the time_sleep rather than the IAM
+  # grant directly.
+  depends_on = [time_sleep.migrate_secret_iam_propagation]
 }
