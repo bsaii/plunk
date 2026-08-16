@@ -69,17 +69,17 @@ api_env_vars = {
   SES_CONFIGURATION_SET             = "plunk-configuration-set"
   SES_CONFIGURATION_SET_NO_TRACKING = "plunk-configuration-set-no-tracking"
 
-  S3_ENDPOINT         = "https://s3.us-east-1.amazonaws.com"   # (from AWS) e.g. https://s3.us-east-1.amazonaws.com
-  S3_REGION           = "us-east-1"     # (from AWS)
-  S3_BUCKET           = "bsaii-plunk-uploads-483528439217"     # (from AWS) terraform/aws's bucket_name output
-  S3_PUBLIC_URL       = "d1wuh4t65cb8mi.cloudfront.net" # (from AWS) terraform/aws's cloudfront_domain_name output
+  S3_ENDPOINT         = "https://s3.us-east-1.amazonaws.com"    # (from AWS) e.g. https://s3.us-east-1.amazonaws.com
+  S3_REGION           = "us-east-1"                             # (from AWS)
+  S3_BUCKET           = "bsaii-plunk-uploads-483528439217"      # (from AWS) terraform/aws's bucket_name output
+  S3_PUBLIC_URL       = "https://d1wuh4t65cb8mi.cloudfront.net" # (from AWS) terraform/aws's cloudfront_domain_name output
   S3_FORCE_PATH_STYLE = "false"
 }
 
 web_env_vars = {
   API_URI       = "https://plunk-api.saton.app"
   DASHBOARD_URI = "https://plunk-web.saton.app"
-  LANDING_URI   = "https://docs.useplunk.com/"
+  LANDING_URI   = "https://www.useplunk.com"
   WIKI_URI      = "https://docs.useplunk.com"
 }
 
