@@ -15,7 +15,6 @@ locals {
     "secretmanager.googleapis.com",        # Secret Manager (api/web/migrate/worker secrets)
     "iam.googleapis.com",                  # Service account + IAM management (iam.tf)
     "cloudbuild.googleapis.com",           # Cloud Build (../../cloudbuild.yaml)
-    "compute.googleapis.com",              # Load balancer, managed cert, serverless NEGs (lb.tf)
     "cloudresourcemanager.googleapis.com", # Project-level IAM bindings (iam.tf)
   ]
 }

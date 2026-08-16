@@ -26,8 +26,9 @@ image, same fail-fast-if-missing pattern as `update-migrate-job`.
 APIs, the Artifact Registry repo, runtime service accounts, and every IAM grant Cloud Build needs
 are now managed declaratively in `terraform/gcp/` (`services.tf` / `iam.tf`) rather than via
 one-off `gcloud` commands — run `terraform apply` there once on a new project before your first
-build. Scaling, custom domains, and the load balancer in front of `plunk-api`/`plunk-web` are
-managed there too — see that directory's README. This file still owns image builds and rollouts
+build. Scaling and the Cloud Run Domain Mappings that give `plunk-api`/`plunk-web` their custom
+domains (Cloudflare proxies to Cloud Run directly — no GCP load balancer) are managed there too —
+see that directory's README. This file still owns image builds and rollouts
 (the `--image` on each service/job/worker pool), with Terraform configured to ignore that field so
 the two don't fight each other.
 

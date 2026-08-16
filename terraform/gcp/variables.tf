@@ -4,7 +4,7 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "GCP region for Cloud Run services, the migrate job, and the load balancer's regional resources (serverless NEGs)."
+  description = "GCP region for Cloud Run services, the migrate job, and the Cloud Run Domain Mappings in dns.tf. Domain Mappings are only available in a subset of regions — check https://cloud.google.com/run/docs/mapping-custom-domains#run before changing this from the default."
   type        = string
   default     = "us-central1"
 }
@@ -71,12 +71,12 @@ variable "worker_image" {
 # --- Domains --------------------------------------------------------------
 
 variable "api_domain" {
-  description = "Public hostname routed to plunk-api by the load balancer, e.g. plunk-api.example.com."
+  description = "Public hostname mapped to plunk-api via the Cloud Run Domain Mapping in dns.tf, e.g. plunk-api.example.com. Must already be verified for this project's identity in Search Console — Google won't issue a certificate for it otherwise. Cloudflare proxies this hostname to Cloud Run; it is not routed through a GCP load balancer."
   type        = string
 }
 
 variable "web_domain" {
-  description = "Public hostname routed to plunk-web by the load balancer, e.g. plunk-app.example.com."
+  description = "Public hostname mapped to plunk-web via the Cloud Run Domain Mapping in dns.tf, e.g. plunk-app.example.com. Same Search Console verification requirement as api_domain."
   type        = string
 }
 
