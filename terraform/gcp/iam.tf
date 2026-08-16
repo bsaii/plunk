@@ -96,6 +96,35 @@ resource "google_secret_manager_secret_iam_member" "worker" {
   member    = "serviceAccount:${google_service_account.worker.email}"
 }
 
+# --- IAM propagation buffer --------------------------------------------
+# Cloud Run resolves every secret_key_ref env var against the runtime
+# service account's roles/secretmanager.secretAccessor grant *at creation
+# time*. IAM grants are eventually consistent, and on a fresh apply Cloud
+# Run's create call can run before Google's backend has finished
+# propagating a grant issued moments earlier in the same apply — the
+# depends_on in api.tf/migrate.tf/worker.tf only orders the API calls, it
+# doesn't wait for propagation. When that race loses, the create fails with
+# a generic "Error code 7, message: The service has encountered an internal
+# error. Please try again later" (gRPC code 7 is PERMISSION_DENIED — Cloud
+# Run just doesn't say so plainly). A plain retry of `apply` fixes it once
+# propagation catches up; these sleeps give the grants a head start so a
+# fresh apply doesn't need one. No sleep for plunk-web: web_secret_env_vars
+# is always empty (see variables.tf), so it has no secret_key_ref to race.
+resource "time_sleep" "api_secret_iam_propagation" {
+  depends_on      = [google_secret_manager_secret_iam_member.api]
+  create_duration = "30s"
+}
+
+resource "time_sleep" "migrate_secret_iam_propagation" {
+  depends_on      = [google_secret_manager_secret_iam_member.migrate]
+  create_duration = "30s"
+}
+
+resource "time_sleep" "worker_secret_iam_propagation" {
+  depends_on      = [google_secret_manager_secret_iam_member.worker]
+  create_duration = "30s"
+}
+
 # --- Cloud Build: grant the existing build SA what it needs ----------------
 # Mirrors the three project-level grants cloudbuild.yaml's header comment
 # used to ask you to run by hand against the legacy default SA, plus two

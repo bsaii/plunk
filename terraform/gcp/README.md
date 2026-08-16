@@ -62,7 +62,10 @@ On a brand-new GCP project there is nothing to click through in the console firs
   see `docs/deploy-cloud-build.md`) `roles/run.admin`, `roles/logging.logWriter`, repo-scoped
   `roles/artifactregistry.writer`, and `roles/iam.serviceAccountUser` on each runtime service
   account individually. The Cloud Build service account itself is **not** created here — it must
-  already exist; this file only grants it IAM roles.
+  already exist; this file only grants it IAM roles. `iam.tf` also has three `time_sleep` resources
+  (`hashicorp/time` provider) that buffer 30s between granting `secretAccessor` and creating the
+  Cloud Run resource that needs it — see that file's comment for the IAM-propagation race this
+  works around.
 
 ## Labels
 
@@ -240,10 +243,11 @@ any `~` (in-place update) or `-` (destroy) line. Roughly, in the order Terraform
 `google_project_service` API enablements, 1 Artifact Registry repo, 4 runtime service accounts, one
 `google_secret_manager_secret_iam_member` per unique secret ID your tfvars' `*_secret_env_vars`
 maps reference (10 unique IDs in the committed template → 18 grants split across api/migrate/
-worker), 7 Cloud Build IAM grants, 2 Cloud Run services plus 2 `run.invoker` bindings, 1 Cloud Run
-Job, 1 Cloud Run Worker Pool, and 2 Cloud Run Domain Mappings (`dns.tf`). That's around 44
-resources total with the template's secret maps left as-is — the exact count scales with how many
-secrets you end up referencing. If `plan` errors instead, it's almost always one of: a secret from
+worker), 3 `time_sleep` IAM-propagation buffers, 7 Cloud Build IAM grants, 2 Cloud Run services plus
+2 `run.invoker` bindings, 1 Cloud Run Job, 1 Cloud Run Worker Pool, and 2 Cloud Run Domain Mappings
+(`dns.tf`). That's around 47 resources total with the template's secret maps left as-is — the exact
+count scales with how many secrets you end up referencing. If `plan` errors instead, it's almost
+always one of: a secret from
 step 3 that doesn't exist yet, the Cloud Build service account from step 2 missing, or
 `-backend-config` pointing at a state bucket that doesn't exist (step 1) — `plan` itself never
 calls the Cloud Run/Secret Manager APIs, so a missing prerequisite only shows up as a graph-build
@@ -251,7 +255,9 @@ error, not a live API error.
 
 #### What to expect from `terraform apply`
 
-Takes a couple of minutes for the Cloud Run resources themselves. The two `google_cloud_run_domain_mapping`
+Takes a couple of minutes for the Cloud Run resources themselves — including the (parallel, ~30s
+each) `time_sleep` buffers between each secret's IAM grant and the resource that consumes it. The
+two `google_cloud_run_domain_mapping`
 resources can take noticeably longer (sometimes several minutes) since Google verifies domain
 ownership and starts certificate issuance as part of creating them — `apply` doesn't return until
 that create call completes, even though the certificate itself is still `PROVISIONING` at that

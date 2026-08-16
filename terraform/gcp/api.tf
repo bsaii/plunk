@@ -75,10 +75,10 @@ resource "google_cloud_run_v2_service" "api" {
   # secret_key_ref values above are plain strings from var.api_secret_env_vars
   # — Terraform sees no attribute reference to
   # google_secret_manager_secret_iam_member.api, so there is no implicit
-  # dependency edge between them. Without this, a first/concurrent apply
-  # could deploy this revision before granting the runtime service account
-  # roles/secretmanager.secretAccessor, and the container fails to start.
-  depends_on = [google_secret_manager_secret_iam_member.api]
+  # dependency edge between them. Depending on the time_sleep (iam.tf)
+  # rather than the IAM grant directly also builds in a propagation buffer —
+  # see that resource's comment for why the grant alone isn't enough.
+  depends_on = [time_sleep.api_secret_iam_propagation]
 }
 
 # Equivalent of today's `--allow-unauthenticated`: with ingress open to the

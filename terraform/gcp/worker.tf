@@ -88,12 +88,7 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
     ]
   }
 
-  # The secret_key_ref values above are plain strings from
-  # var.worker_secret_env_vars — Terraform sees no attribute reference to
-  # google_secret_manager_secret_iam_member.worker, so there is no implicit
-  # dependency edge between them. Without this, Terraform is free to deploy
-  # this revision before granting the runtime service account
-  # roles/secretmanager.secretAccessor, and the container fails to start
-  # (permission denied resolving the secret) on a first/concurrent apply.
-  depends_on = [google_secret_manager_secret_iam_member.worker]
+  # See api.tf for why this depends on the time_sleep rather than the IAM
+  # grant directly.
+  depends_on = [time_sleep.worker_secret_iam_propagation]
 }
