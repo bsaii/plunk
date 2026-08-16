@@ -93,8 +93,8 @@ or `terraform output` in `terraform/aws`) rather than from this environment.
 export PROJECT_ID="your-gcp-project-id"
 gcloud config set project "$PROJECT_ID"
 
-# A brand-new project has no billing account linked yet — Cloud Run, the load
-# balancer, and Secret Manager all require one. Check first:
+# A brand-new project has no billing account linked yet — Cloud Run and
+# Secret Manager both require one. Check first:
 gcloud billing projects describe "$PROJECT_ID"
 # If it shows billingEnabled: false, link one (get the ID from `gcloud billing accounts list`):
 gcloud billing projects link "$PROJECT_ID" --billing-account=YOUR_BILLING_ACCOUNT_ID
