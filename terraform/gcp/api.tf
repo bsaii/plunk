@@ -15,10 +15,23 @@ resource "google_cloud_run_v2_service" "api" {
   template {
     scaling {
       min_instance_count = 1
+      max_instance_count = var.api_max_instance_count
     }
+
+    # Dedicated runtime identity (iam.tf) — grants exactly the Secret Manager
+    # access this service needs instead of the shared per-project default
+    # compute service account.
+    service_account = google_service_account.api.email
 
     containers {
       image = var.api_image
+
+      resources {
+        limits = {
+          cpu    = var.api_cpu
+          memory = var.api_memory
+        }
+      }
 
       ports {
         container_port = 8080
@@ -56,6 +69,14 @@ resource "google_cloud_run_v2_service" "api" {
       template[0].containers[0].image,
     ]
   }
+
+  # secret_key_ref values above are plain strings from var.api_secret_env_vars
+  # — Terraform sees no attribute reference to
+  # google_secret_manager_secret_iam_member.api, so there is no implicit
+  # dependency edge between them. Without this, a first/concurrent apply
+  # could deploy this revision before granting the runtime service account
+  # roles/secretmanager.secretAccessor, and the container fails to start.
+  depends_on = [google_secret_manager_secret_iam_member.api]
 }
 
 # Equivalent of today's `--allow-unauthenticated`: the load balancer's

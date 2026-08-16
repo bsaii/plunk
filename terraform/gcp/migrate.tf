@@ -15,10 +15,22 @@ resource "google_cloud_run_v2_job" "migrate" {
 
   template {
     template {
+      # Dedicated runtime identity (iam.tf) — grants exactly the Secret
+      # Manager access this job needs instead of the shared per-project
+      # default compute service account.
+      service_account = google_service_account.migrate.email
+
       containers {
         image   = var.migrate_image
         command = ["node_modules/.bin/prisma"]
         args    = ["migrate", "deploy", "--schema=packages/db/prisma/schema.prisma"]
+
+        resources {
+          limits = {
+            cpu    = var.migrate_cpu
+            memory = var.migrate_memory
+          }
+        }
 
         dynamic "env" {
           for_each = var.migrate_env_vars
@@ -51,4 +63,8 @@ resource "google_cloud_run_v2_job" "migrate" {
       template[0].template[0].containers[0].image,
     ]
   }
+
+  # See api.tf for why this explicit dependency is needed — Terraform has no
+  # implicit edge to the Secret Manager IAM grant otherwise.
+  depends_on = [google_secret_manager_secret_iam_member.migrate]
 }
