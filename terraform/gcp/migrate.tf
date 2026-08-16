@@ -9,6 +9,9 @@ resource "google_cloud_run_v2_job" "migrate" {
   project  = var.project_id
   location = var.region
 
+  # See api.tf for why this is off during bootstrap.
+  deletion_protection = false
+
   labels = merge(local.common_labels, {
     component = "migrate"
   })

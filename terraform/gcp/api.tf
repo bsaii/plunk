@@ -10,6 +10,15 @@ resource "google_cloud_run_v2_service" "api" {
   location = var.region
   ingress  = "INGRESS_TRAFFIC_ALL"
 
+  # Defaults to true in the provider — off here since this whole directory
+  # targets a brand-new project with nothing serving real traffic yet (see
+  # the header of this directory's README); a botched first create (e.g.
+  # the IAM-propagation race iam.tf's time_sleep resources work around) is
+  # more likely at this stage than an accidental destroy worth guarding
+  # against. Worth flipping back to true (or just deleting this line) once
+  # this is a stable deployment with real users.
+  deletion_protection = false
+
   labels = merge(local.common_labels, {
     component = "api"
   })
