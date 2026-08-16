@@ -53,7 +53,7 @@ output "load_balancer_ip" {
   value       = google_compute_global_address.plunk_lb_ip.address
 }
 
-output "ssl_certificate_status" {
-  description = "Provisioning status of the managed SSL certificate. Stays PROVISIONING until DNS for both domains resolves to load_balancer_ip."
-  value       = google_compute_managed_ssl_certificate.plunk_cert.managed[0].status
+output "ssl_certificate_name" {
+  description = "Name of the managed SSL certificate. The hashicorp/google provider does not expose provisioning status as a resource attribute (there is no `managed[0].status` on google_compute_managed_ssl_certificate) — check it with: gcloud compute ssl-certificates describe <this output> --format='value(managed.status,managed.domainStatus)'. Stays PROVISIONING until DNS for both domains resolves to load_balancer_ip."
+  value       = google_compute_managed_ssl_certificate.plunk_cert.name
 }

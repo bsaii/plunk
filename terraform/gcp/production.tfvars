@@ -1,31 +1,34 @@
-# Production values for the GCP Cloud Run + load balancer stack.
+# Template values for the GCP Cloud Run + load balancer stack.
 #
-# project_id matches the GCP project the plunk-cloud-build service account
-# already lives in (plunk-cloud-build@saii-407116.iam.gserviceaccount.com —
-# see docs/deploy-cloud-build.md and iam.tf's cloud_build_service_account_id).
-# Confirm this is still correct against the GCP console before relying on it
-# — unlike terraform/aws/production.tfvars's bucket_name (pinned against an
-# already-running distribution), nothing in this GCP project has been
-# deployed yet, so there is no live resource to cross-check it against.
+# This targets a brand-new GCP project — nothing has been deployed yet, so
+# nothing below can be pre-verified against a live resource (unlike
+# terraform/aws/production.tfvars, which pins values against an
+# already-running distribution). Replace every REPLACE_WITH_* placeholder
+# before running `terraform plan`; everything else here (compute sizing,
+# non-AWS env var names) is a sane default, not a project-specific fact.
 #
-# api_domain / web_domain match the hosted Plunk instance's real subdomains
-# (see .env.self-host.example, CONTRIBUTING.md). Contains no credentials —
-# safe to commit. Secret values referenced in *_secret_env_vars below are
-# Secret Manager secret IDs only (never the secret material itself) and MUST
-# already exist in Secret Manager before `terraform apply` — see this
-# directory's README.
-project_id  = "saii-407116"
+# Values commented "(from AWS)" come from your AWS account / terraform/aws
+# stack. If you're filling this in from GCP Cloud Shell, it has no AWS
+# credentials — fetch these from wherever you do have AWS access (your own
+# workstation, or `terraform output` in terraform/aws) and paste the plain
+# (non-secret) values in here; the actual secret values never go in this
+# file — see the *_secret_env_vars maps and this directory's README.
+#
+# Contains no credentials — safe to commit once every placeholder below is
+# replaced with a real (non-secret) identifier.
+project_id  = "REPLACE_WITH_YOUR_GCP_PROJECT_ID"
 region      = "us-central1"
 environment = "production"
 
-api_domain = "next-api.useplunk.com"
-web_domain = "next-app.useplunk.com"
+api_domain = "REPLACE_WITH_YOUR_API_DOMAIN" # e.g. api.example.com
+web_domain = "REPLACE_WITH_YOUR_WEB_DOMAIN" # e.g. app.example.com
 
 # --- Explicit compute sizing --------------------------------------------
-# Pinned here (rather than left to variables.tf's defaults) so `terraform
-# plan` is always the source of truth for what's actually provisioned, per
-# this directory's README. Adjust after checking real usage against the
-# GCP Pricing Calculator / Cloud Monitoring.
+# Sane starting points, not project-specific — pinned here (rather than left
+# to variables.tf's defaults) so `terraform plan` is always the source of
+# truth for what's actually provisioned, per this directory's README. Adjust
+# after checking real usage against the GCP Pricing Calculator / Cloud
+# Monitoring.
 api_cpu                = "1"
 api_memory             = "512Mi"
 api_max_instance_count = 10
@@ -44,43 +47,40 @@ worker_instance_count = 1
 # --- Non-secret environment variables -----------------------------------
 # AWS_SES_REGION has no default in apps/api/src/app/constants.ts
 # (validateEnv('AWS_SES_REGION') with no fallback) — omitting it crashes
-# api/worker at boot. Replace "us-east-1" below if your SES identities live
-# in a different region.
+# api/worker at boot.
 #
-# S3_* values point the API at the real CloudFront-fronted bucket from
-# terraform/aws (see that directory's production.tfvars /
-# apps/api/src/services/S3Service.ts) instead of falling back to
-# constants.ts's Minio-dev defaults (S3_ENDPOINT=http://minio:9000,
-# S3_BUCKET=uploads, S3_FORCE_PATH_STYLE=true) — the last of those matters
-# most: leaving it at the true/Minio default makes the API try to set a
-# PUBLIC bucket policy on a real AWS S3 bucket at startup, fighting the
-# private, CloudFront-scoped policy terraform/aws manages. Replace
-# S3_PUBLIC_URL with the real `cloudfront_domain_name` output from
-# terraform/aws once that stack has been applied.
+# S3_* values point the API at wherever your uploads bucket actually lives
+# instead of falling back to constants.ts's Minio-dev defaults
+# (S3_ENDPOINT=http://minio:9000, S3_BUCKET=uploads,
+# S3_FORCE_PATH_STYLE=true) — the last of those matters most: leaving it at
+# the true/Minio default makes the API try to set a PUBLIC bucket policy on
+# a real AWS S3 bucket at startup, fighting a private, CloudFront-scoped
+# policy such as terraform/aws manages. If you're using terraform/aws,
+# S3_PUBLIC_URL is that stack's cloudfront_domain_name output.
 
 api_env_vars = {
   NODE_ENV      = "production"
-  API_URI       = "https://next-api.useplunk.com"
-  DASHBOARD_URI = "https://next-app.useplunk.com"
-  LANDING_URI   = "https://www.useplunk.com"
-  WIKI_URI      = "https://docs.useplunk.com"
+  API_URI       = "https://REPLACE_WITH_YOUR_API_DOMAIN"
+  DASHBOARD_URI = "https://REPLACE_WITH_YOUR_WEB_DOMAIN"
+  LANDING_URI   = "REPLACE_WITH_YOUR_LANDING_URI" # e.g. https://www.example.com
+  WIKI_URI      = "REPLACE_WITH_YOUR_WIKI_URI"    # e.g. https://docs.example.com — optional, delete the key to skip
 
-  AWS_SES_REGION                    = "us-east-1"
-  SES_CONFIGURATION_SET             = "plunk-configuration-set"
-  SES_CONFIGURATION_SET_NO_TRACKING = "plunk-configuration-set-no-tracking"
+  AWS_SES_REGION                    = "REPLACE_WITH_YOUR_AWS_SES_REGION" # (from AWS) e.g. us-east-1
+  SES_CONFIGURATION_SET             = "REPLACE_WITH_YOUR_SES_CONFIGURATION_SET"
+  SES_CONFIGURATION_SET_NO_TRACKING = "REPLACE_WITH_YOUR_SES_CONFIGURATION_SET_NO_TRACKING"
 
-  S3_ENDPOINT         = "https://s3.us-east-1.amazonaws.com"
-  S3_REGION           = "us-east-1"
-  S3_BUCKET           = "bsaii-plunk-uploads-483528439217"
-  S3_PUBLIC_URL       = "https://REPLACE_WITH_terraform_output_cloudfront_domain_name"
+  S3_ENDPOINT         = "REPLACE_WITH_YOUR_S3_ENDPOINT"   # (from AWS) e.g. https://s3.us-east-1.amazonaws.com
+  S3_REGION           = "REPLACE_WITH_YOUR_S3_REGION"     # (from AWS)
+  S3_BUCKET           = "REPLACE_WITH_YOUR_S3_BUCKET"     # (from AWS) terraform/aws's bucket_name output
+  S3_PUBLIC_URL       = "REPLACE_WITH_YOUR_S3_PUBLIC_URL" # (from AWS) terraform/aws's cloudfront_domain_name output
   S3_FORCE_PATH_STYLE = "false"
 }
 
 web_env_vars = {
-  API_URI       = "https://next-api.useplunk.com"
-  DASHBOARD_URI = "https://next-app.useplunk.com"
-  LANDING_URI   = "https://www.useplunk.com"
-  WIKI_URI      = "https://docs.useplunk.com"
+  API_URI       = "https://REPLACE_WITH_YOUR_API_DOMAIN"
+  DASHBOARD_URI = "https://REPLACE_WITH_YOUR_WEB_DOMAIN"
+  LANDING_URI   = "REPLACE_WITH_YOUR_LANDING_URI"
+  WIKI_URI      = "REPLACE_WITH_YOUR_WIKI_URI"
 }
 
 migrate_env_vars = {
@@ -95,14 +95,14 @@ migrate_env_vars = {
 # too.
 worker_env_vars = {
   NODE_ENV      = "production"
-  API_URI       = "https://next-api.useplunk.com"
-  DASHBOARD_URI = "https://next-app.useplunk.com"
-  LANDING_URI   = "https://www.useplunk.com"
-  WIKI_URI      = "https://docs.useplunk.com"
+  API_URI       = "https://REPLACE_WITH_YOUR_API_DOMAIN"
+  DASHBOARD_URI = "https://REPLACE_WITH_YOUR_WEB_DOMAIN"
+  LANDING_URI   = "REPLACE_WITH_YOUR_LANDING_URI"
+  WIKI_URI      = "REPLACE_WITH_YOUR_WIKI_URI"
 
-  AWS_SES_REGION                    = "us-east-1"
-  SES_CONFIGURATION_SET             = "plunk-configuration-set"
-  SES_CONFIGURATION_SET_NO_TRACKING = "plunk-configuration-set-no-tracking"
+  AWS_SES_REGION                    = "REPLACE_WITH_YOUR_AWS_SES_REGION" # (from AWS)
+  SES_CONFIGURATION_SET             = "REPLACE_WITH_YOUR_SES_CONFIGURATION_SET"
+  SES_CONFIGURATION_SET_NO_TRACKING = "REPLACE_WITH_YOUR_SES_CONFIGURATION_SET_NO_TRACKING"
 }
 
 # --- Secret environment variables ---------------------------------------
@@ -111,7 +111,10 @@ worker_env_vars = {
 #   gcloud secrets create plunk-jwt-secret --replication-policy=automatic
 #   echo -n "<value>" | gcloud secrets versions add plunk-jwt-secret --data-file=-
 # iam.tf grants each runtime service account roles/secretmanager.secretAccessor
-# scoped to exactly the secrets referenced below — nothing broader.
+# scoped to exactly the secrets referenced below — nothing broader. See this
+# directory's README for the full list of `gcloud secrets create` commands,
+# including which values are (from AWS) and must be fetched from outside
+# GCP Cloud Shell.
 
 # STRIPE_SK / STRIPE_WEBHOOK_SECRET are OPTIONAL (constants.ts defaults both
 # to "" and gates STRIPE_ENABLED on them being non-empty — billing features
@@ -124,10 +127,10 @@ api_secret_env_vars = {
   DATABASE_URL              = "plunk-database-url"
   DIRECT_DATABASE_URL       = "plunk-direct-database-url"
   REDIS_URL                 = "plunk-redis-url"
-  AWS_SES_ACCESS_KEY_ID     = "plunk-ses-access-key-id"
-  AWS_SES_SECRET_ACCESS_KEY = "plunk-ses-secret-access-key"
-  S3_ACCESS_KEY_ID          = "plunk-s3-access-key-id"
-  S3_ACCESS_KEY_SECRET      = "plunk-s3-access-key-secret"
+  AWS_SES_ACCESS_KEY_ID     = "plunk-ses-access-key-id"     # (from AWS)
+  AWS_SES_SECRET_ACCESS_KEY = "plunk-ses-secret-access-key" # (from AWS)
+  S3_ACCESS_KEY_ID          = "plunk-s3-access-key-id"      # (from AWS)
+  S3_ACCESS_KEY_SECRET      = "plunk-s3-access-key-secret"  # (from AWS)
   STRIPE_SK                 = "plunk-stripe-sk"
   STRIPE_WEBHOOK_SECRET     = "plunk-stripe-webhook-secret"
 }
@@ -146,6 +149,6 @@ worker_secret_env_vars = {
   DATABASE_URL              = "plunk-database-url"
   DIRECT_DATABASE_URL       = "plunk-direct-database-url"
   REDIS_URL                 = "plunk-redis-url"
-  AWS_SES_ACCESS_KEY_ID     = "plunk-ses-access-key-id"
-  AWS_SES_SECRET_ACCESS_KEY = "plunk-ses-secret-access-key"
+  AWS_SES_ACCESS_KEY_ID     = "plunk-ses-access-key-id"     # (from AWS)
+  AWS_SES_SECRET_ACCESS_KEY = "plunk-ses-secret-access-key" # (from AWS)
 }
