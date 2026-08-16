@@ -16,12 +16,12 @@
 #
 # Contains no credentials — safe to commit once every placeholder below is
 # replaced with a real (non-secret) identifier.
-project_id  = "REPLACE_WITH_YOUR_GCP_PROJECT_ID"
+project_id  = "saton-504611"
 region      = "us-central1"
 environment = "production"
 
-api_domain = "REPLACE_WITH_YOUR_API_DOMAIN" # e.g. api.example.com
-web_domain = "REPLACE_WITH_YOUR_WEB_DOMAIN" # e.g. app.example.com
+api_domain = "plunk-api.saton.app"
+web_domain = "plunk-web.saton.app"
 
 # --- Explicit compute sizing --------------------------------------------
 # Sane starting points, not project-specific — pinned here (rather than left
@@ -60,27 +60,27 @@ worker_instance_count = 1
 
 api_env_vars = {
   NODE_ENV      = "production"
-  API_URI       = "https://REPLACE_WITH_YOUR_API_DOMAIN"
-  DASHBOARD_URI = "https://REPLACE_WITH_YOUR_WEB_DOMAIN"
-  LANDING_URI   = "REPLACE_WITH_YOUR_LANDING_URI" # e.g. https://www.example.com
-  WIKI_URI      = "REPLACE_WITH_YOUR_WIKI_URI"    # e.g. https://docs.example.com — optional, delete the key to skip
+  API_URI       = "https://plunk-api.saton.app"
+  DASHBOARD_URI = "https://plunk-web.saton.app"
+  LANDING_URI   = "https://www.useplunk.com"
+  WIKI_URI      = "https://docs.useplunk.com"
 
-  AWS_SES_REGION                    = "REPLACE_WITH_YOUR_AWS_SES_REGION" # (from AWS) e.g. us-east-1
-  SES_CONFIGURATION_SET             = "REPLACE_WITH_YOUR_SES_CONFIGURATION_SET"
-  SES_CONFIGURATION_SET_NO_TRACKING = "REPLACE_WITH_YOUR_SES_CONFIGURATION_SET_NO_TRACKING"
+  AWS_SES_REGION                    = "us-east-1" # (from AWS) e.g. us-east-1
+  SES_CONFIGURATION_SET             = "plunk-configuration-set"
+  SES_CONFIGURATION_SET_NO_TRACKING = "plunk-configuration-set-no-tracking"
 
-  S3_ENDPOINT         = "REPLACE_WITH_YOUR_S3_ENDPOINT"   # (from AWS) e.g. https://s3.us-east-1.amazonaws.com
-  S3_REGION           = "REPLACE_WITH_YOUR_S3_REGION"     # (from AWS)
-  S3_BUCKET           = "REPLACE_WITH_YOUR_S3_BUCKET"     # (from AWS) terraform/aws's bucket_name output
-  S3_PUBLIC_URL       = "REPLACE_WITH_YOUR_S3_PUBLIC_URL" # (from AWS) terraform/aws's cloudfront_domain_name output
+  S3_ENDPOINT         = "https://s3.us-east-1.amazonaws.com"    # (from AWS) e.g. https://s3.us-east-1.amazonaws.com
+  S3_REGION           = "us-east-1"                             # (from AWS)
+  S3_BUCKET           = "bsaii-plunk-uploads-483528439217"      # (from AWS) terraform/aws's bucket_name output
+  S3_PUBLIC_URL       = "https://d1wuh4t65cb8mi.cloudfront.net" # (from AWS) terraform/aws's cloudfront_domain_name output
   S3_FORCE_PATH_STYLE = "false"
 }
 
 web_env_vars = {
-  API_URI       = "https://REPLACE_WITH_YOUR_API_DOMAIN"
-  DASHBOARD_URI = "https://REPLACE_WITH_YOUR_WEB_DOMAIN"
-  LANDING_URI   = "REPLACE_WITH_YOUR_LANDING_URI"
-  WIKI_URI      = "REPLACE_WITH_YOUR_WIKI_URI"
+  API_URI       = "https://plunk-api.saton.app"
+  DASHBOARD_URI = "https://plunk-web.saton.app"
+  LANDING_URI   = "https://www.useplunk.com"
+  WIKI_URI      = "https://docs.useplunk.com"
 }
 
 migrate_env_vars = {
@@ -95,14 +95,14 @@ migrate_env_vars = {
 # too.
 worker_env_vars = {
   NODE_ENV      = "production"
-  API_URI       = "https://REPLACE_WITH_YOUR_API_DOMAIN"
-  DASHBOARD_URI = "https://REPLACE_WITH_YOUR_WEB_DOMAIN"
-  LANDING_URI   = "REPLACE_WITH_YOUR_LANDING_URI"
-  WIKI_URI      = "REPLACE_WITH_YOUR_WIKI_URI"
+  API_URI       = "https://plunk-api.saton.app"
+  DASHBOARD_URI = "https://plunk-web.saton.app"
+  LANDING_URI   = "https://www.useplunk.com"
+  WIKI_URI      = "https://docs.useplunk.com"
 
-  AWS_SES_REGION                    = "REPLACE_WITH_YOUR_AWS_SES_REGION" # (from AWS)
-  SES_CONFIGURATION_SET             = "REPLACE_WITH_YOUR_SES_CONFIGURATION_SET"
-  SES_CONFIGURATION_SET_NO_TRACKING = "REPLACE_WITH_YOUR_SES_CONFIGURATION_SET_NO_TRACKING"
+  AWS_SES_REGION                    = "us-east-1" # (from AWS)
+  SES_CONFIGURATION_SET             = "plunk-configuration-set"
+  SES_CONFIGURATION_SET_NO_TRACKING = "plunk-configuration-set-no-tracking"
 }
 
 # --- Secret environment variables ---------------------------------------
