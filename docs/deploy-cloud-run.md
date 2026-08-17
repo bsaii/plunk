@@ -16,7 +16,7 @@ the target, the service name and the environment differ.
 export PROJECT_ID=your-gcp-project
 export REGION=europe-west1
 export REPO=plunk
-export PLUNK_VERSION=v0.12.0
+export PLUNK_VERSION=v0.13.0
 export IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/plunk-web:${PLUNK_VERSION}"
 
 gcloud config set project "$PROJECT_ID"
