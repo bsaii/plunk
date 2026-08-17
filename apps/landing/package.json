@@ -11,6 +11,9 @@
     "clean": "rimraf node_modules .next .turbo"
   },
   "dependencies": {
+    "@fontsource/bricolage-grotesque": "^5.3.0",
+    "@fontsource/hanken-grotesk": "^5.3.0",
+    "@fontsource/jetbrains-mono": "^5.3.0",
     "@plunk/db": "*",
     "@plunk/shared": "*",
     "@plunk/ui": "*",

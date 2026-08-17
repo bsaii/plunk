@@ -1,6 +1,6 @@
 import {Footer, Navbar, SectionHeader} from '../components';
 import {motion} from 'framer-motion';
-import {Bricolage_Grotesque, Hanken_Grotesk, JetBrains_Mono} from 'next/font/google';
+import {display, body, mono} from '../lib/fonts';
 import {DASHBOARD_URI, LANDING_URI, WIKI_URI} from '../lib/constants';
 import React from 'react';
 import {NextSeo} from 'next-seo';
@@ -28,27 +28,6 @@ import {
   Users,
   Workflow,
 } from 'lucide-react';
-
-const display = Bricolage_Grotesque({
-  subsets: ['latin'],
-  variable: '--font-display',
-  display: 'swap',
-  weight: ['400', '500', '600', '700', '800'],
-});
-
-const body = Hanken_Grotesk({
-  subsets: ['latin'],
-  variable: '--font-body',
-  display: 'swap',
-  weight: ['400', '500', '600', '700'],
-});
-
-const mono = JetBrains_Mono({
-  subsets: ['latin'],
-  variable: '--font-mono',
-  display: 'swap',
-  weight: ['400', '500'],
-});
 
 const testimonials = [
   {

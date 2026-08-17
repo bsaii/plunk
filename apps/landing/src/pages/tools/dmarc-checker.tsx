@@ -5,30 +5,9 @@ import React, {useState} from 'react';
 import {NextSeo} from 'next-seo';
 import {AlertTriangle, ArrowRight, CheckCircle, ShieldCheck, XCircle} from 'lucide-react';
 import {Button, Input} from '@plunk/ui';
-import {Bricolage_Grotesque, Hanken_Grotesk, JetBrains_Mono} from 'next/font/google';
+import {display, body, mono} from '../../lib/fonts';
 import Link from 'next/link';
 import type {FAQ} from '../../components/FAQSection';
-
-const display = Bricolage_Grotesque({
-  subsets: ['latin'],
-  variable: '--font-display',
-  display: 'swap',
-  weight: ['400', '500', '600', '700', '800'],
-});
-
-const body = Hanken_Grotesk({
-  subsets: ['latin'],
-  variable: '--font-body',
-  display: 'swap',
-  weight: ['400', '500', '600', '700'],
-});
-
-const mono = JetBrains_Mono({
-  subsets: ['latin'],
-  variable: '--font-mono',
-  display: 'swap',
-  weight: ['400', '500'],
-});
 
 interface DmarcIssue {
   type: 'error' | 'warning' | 'pass';

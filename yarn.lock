@@ -1975,6 +1975,27 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@fontsource/bricolage-grotesque@npm:^5.3.0":
+  version: 5.3.0
+  resolution: "@fontsource/bricolage-grotesque@npm:5.3.0"
+  checksum: 10c0/40cce6bb0b1cde1b7e789a74eb1903aa62a33a1c4b7b93ed2d1cff4ee16f5136e8e18ea49a134b32d244b7b1048d428e9f21b83906b0781d0ed11bf00365fecc
+  languageName: node
+  linkType: hard
+
+"@fontsource/hanken-grotesk@npm:^5.3.0":
+  version: 5.3.0
+  resolution: "@fontsource/hanken-grotesk@npm:5.3.0"
+  checksum: 10c0/4c009c37017a5d5288ae393f393b8ef400813d9dd932647ed4bf34efe0c6cefeceaf69f7ae975a30523a3507d26d1793cfb6a89bcd971aed2c8c940e3c7d0c5e
+  languageName: node
+  linkType: hard
+
+"@fontsource/jetbrains-mono@npm:^5.3.0":
+  version: 5.3.0
+  resolution: "@fontsource/jetbrains-mono@npm:5.3.0"
+  checksum: 10c0/1351b2350e893f5da39559ed90ff0e5e60bcc876b1f40531ad081ad4bf2f3cda3fa9e8940364aef5a7430ae3140685c9cd4819c36d8ad62bcd3fa37e3cc66b1d
+  languageName: node
+  linkType: hard
+
 "@formatjs/cli@npm:^6.7.4":
   version: 6.7.4
   resolution: "@formatjs/cli@npm:6.7.4"
@@ -13326,6 +13347,9 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "landing@workspace:apps/landing"
   dependencies:
+    "@fontsource/bricolage-grotesque": "npm:^5.3.0"
+    "@fontsource/hanken-grotesk": "npm:^5.3.0"
+    "@fontsource/jetbrains-mono": "npm:^5.3.0"
     "@plunk/db": "npm:*"
     "@plunk/eslint-config": "npm:*"
     "@plunk/shared": "npm:*"
