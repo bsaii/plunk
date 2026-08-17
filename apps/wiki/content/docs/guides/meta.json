@@ -5,11 +5,13 @@
     "receiving-emails",
     "tracking",
     "api-keys",
+    "idempotency",
     "localization",
     "webhooks",
     "importing-contacts",
     "custom-fields",
     "segment-filters",
-    "unsubscribe-pages"
+    "unsubscribe-pages",
+    "data-retention"
   ]
 }

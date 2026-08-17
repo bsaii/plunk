@@ -4,11 +4,13 @@ import type {RedisOptions} from 'ioredis';
 import signale from 'signale';
 import type {
   ApiRequestCleanupJobData,
+  IdempotencyKeyCleanupJobData,
   BulkContactActionJobData,
   BulkContactActionSelector,
   CampaignBatchJobData,
   ContactImportJobData,
   DomainVerificationJobData,
+  EmailBodyCleanupJobData,
   MeterEventJobData,
   ScheduledCampaignJobData,
   SegmentCountJobData,
@@ -126,6 +128,32 @@ export const domainVerificationQueue = new Queue<DomainVerificationJobData>('dom
 });
 
 export const apiRequestCleanupQueue = new Queue<ApiRequestCleanupJobData>('api-request-cleanup', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 2,
+    backoff: {
+      type: 'exponential',
+      delay: 30000,
+    },
+    removeOnComplete: 5, // Keep last 5 completed jobs
+    removeOnFail: 20, // Keep last 20 failed jobs
+  },
+});
+
+export const idempotencyKeyCleanupQueue = new Queue<IdempotencyKeyCleanupJobData>('idempotency-key-cleanup', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 2,
+    backoff: {
+      type: 'exponential',
+      delay: 30000,
+    },
+    removeOnComplete: 5, // Keep last 5 completed jobs
+    removeOnFail: 20, // Keep last 20 failed jobs
+  },
+});
+
+export const emailBodyCleanupQueue = new Queue<EmailBodyCleanupJobData>('email-body-cleanup', {
   connection: redisConnection,
   defaultJobOptions: {
     attempts: 2,
@@ -435,6 +463,7 @@ export class QueueService {
       segmentCountCounts,
       domainVerificationCounts,
       apiRequestCleanupCounts,
+      idempotencyKeyCleanupCounts,
       bulkContactCounts,
       meterCounts,
     ] = await Promise.all([
@@ -446,6 +475,7 @@ export class QueueService {
       segmentCountQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
       domainVerificationQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
       apiRequestCleanupQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
+      idempotencyKeyCleanupQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
       bulkContactQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
       meterQueue.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed'),
     ]);
@@ -459,6 +489,7 @@ export class QueueService {
       segmentCount: segmentCountCounts,
       domainVerification: domainVerificationCounts,
       apiRequestCleanup: apiRequestCleanupCounts,
+      idempotencyKeyCleanup: idempotencyKeyCleanupCounts,
       bulkContact: bulkContactCounts,
       meter: meterCounts,
     };
