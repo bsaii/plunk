@@ -34,6 +34,7 @@ import {Oauth} from './controllers/Oauth/index.js';
 import {Projects} from './controllers/Projects.js';
 import {Segments} from './controllers/Segments.js';
 import {Templates} from './controllers/Templates.js';
+import {Unsubscribe} from './controllers/Unsubscribe.js';
 import {Uploads} from './controllers/Uploads.js';
 import {Users} from './controllers/Users.js';
 import {Webhooks} from './controllers/Webhooks.js';
@@ -41,7 +42,13 @@ import {Workflows} from './controllers/Workflows.js';
 import {Config} from './controllers/Config.js';
 import {prisma} from './database/prisma.js';
 import {ErrorCode, type FieldError, HttpException, ValidationError} from './exceptions/index.js';
-import {apiRequestCleanupQueue, domainVerificationQueue, segmentCountQueue} from './services/QueueService.js';
+import {
+  apiRequestCleanupQueue,
+  domainVerificationQueue,
+  emailBodyCleanupQueue,
+  idempotencyKeyCleanupQueue,
+  segmentCountQueue,
+} from './services/QueueService.js';
 import * as S3Service from './services/S3Service.js';
 import {requestIdMiddleware} from './middleware/requestId.js';
 import {databaseRequestLogger} from './middleware/requestLogger.js';
@@ -159,6 +166,7 @@ const server = new (class extends Server {
       new Projects(),
       new Segments(),
       new Templates(),
+      new Unsubscribe(),
       new Uploads(),
       new Webhooks(),
       new Workflows(),
@@ -340,6 +348,10 @@ server.app.use((error: Error, req: Request, res: Response, _next: NextFunction) 
       case ErrorCode.PROJECT_DISABLED:
         suggestion = 'Your project has been disabled. Contact support for assistance.';
         break;
+      case ErrorCode.IDEMPOTENCY_KEY_REUSED:
+        suggestion =
+          'This Idempotency-Key was already used, so the request was refused rather than performed twice. Generate a new key for a genuinely new request.';
+        break;
     }
 
     const response: ErrorResponse = {
@@ -497,4 +509,34 @@ void prisma.$connect().then(async () => {
   );
 
   signale.info('[BACKGROUND-JOB] API request cleanup scheduled (BullMQ repeatable job, runs daily at 3 AM)');
+
+  // Set up repeatable job for expired idempotency key cleanup (BullMQ)
+  // Runs hourly: expiry is what makes a key reusable, so the sweep should track the TTL
+  await idempotencyKeyCleanupQueue.add(
+    'cleanup-expired-keys',
+    {},
+    {
+      repeat: {
+        pattern: '0 * * * *', // Hourly, on the hour
+      },
+      jobId: 'idempotency-key-cleanup-repeatable', // Fixed ID to prevent duplicates
+    },
+  );
+
+  signale.info('[BACKGROUND-JOB] Idempotency key cleanup scheduled (BullMQ repeatable job, runs hourly)');
+
+  // Set up repeatable job for email body cleanup (BullMQ)
+  // Run daily at 4 AM, offset from the API request cleanup so the two don't overlap
+  await emailBodyCleanupQueue.add(
+    'cleanup-old-email-bodies',
+    {},
+    {
+      repeat: {
+        pattern: '0 4 * * *', // Daily at 4 AM
+      },
+      jobId: 'email-body-cleanup-repeatable', // Fixed ID to prevent duplicates
+    },
+  );
+
+  signale.info('[BACKGROUND-JOB] Email body cleanup scheduled (BullMQ repeatable job, runs daily at 4 AM)');
 });
