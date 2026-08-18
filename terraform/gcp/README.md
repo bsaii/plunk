@@ -189,12 +189,12 @@ echo -n "whsec_..."   | gcloud secrets versions add plunk-stripe-webhook-secret 
 
 ### 4. Fill in `production.tfvars`
 
-The committed file is a template — every `REPLACE_WITH_*` placeholder (`project_id`,
-`api_domain`/`web_domain`, and the AWS-sourced `S3_*`/`AWS_SES_REGION` values) needs a real value
-before `terraform plan` will produce a sane plan; see the file's own comments for what each one
-needs and which are safe defaults to leave alone. For a new/non-production environment, copy it to
-a differently-named `<environment>.tfvars` instead of editing in place (same reasoning as
-`terraform/aws/README.md`'s equivalent section).
+Copy the tracked `production.tfvars.example` template to `production.tfvars` (gitignored — see the
+root `.gitignore`'s `*.tfvars` / `!*.tfvars.example` rules, and never commit the copy) and fill in
+every `REPLACE_WITH_*` placeholder (`project_id`, `api_domain`/`web_domain`, and the AWS-sourced
+`S3_*`/`AWS_SES_REGION` values) — see the file's own comments for what each one needs and which are
+safe defaults to leave alone. For a new/non-production environment, copy it to a differently-named
+`<environment>.tfvars` instead (same reasoning as `terraform/aws/README.md`'s equivalent section).
 
 Non-secret env vars go in `api_env_vars` / `web_env_vars` / `migrate_env_vars` / `worker_env_vars`
 (plain maps). Secret values (`JWT_SECRET`, `DATABASE_URL`, AWS keys, etc.) go in

@@ -1,0 +1,30 @@
+# Example values for the AWS uploads stack (S3 + CloudFront).
+#
+# Copy this file to production.tfvars (or a differently-named
+# <environment>.tfvars for a non-production environment) and fill in every
+# REPLACE_WITH_* placeholder before running `terraform plan`. The copy is
+# gitignored (see the root .gitignore's `*.tfvars` / `!*.tfvars.example`
+# rules) — it pins values specific to your AWS account and must never be
+# committed.
+#
+# bucket_name must be globally unique across all of AWS and should stay
+# fixed once you've applied once — S3 bucket names can't be renamed in
+# place, and changing this later makes Terraform plan a destructive
+# replacement of the bucket and its Origin Access Control (which
+# `prevent_destroy` blocks, but you don't want to get that far). A common
+# pattern is `<your-project>-uploads-<your-aws-account-id>`, since the plain
+# name is almost always already taken by someone else's bucket.
+bucket_name = "REPLACE_WITH_YOUR_BUCKET_NAME" # e.g. plunk-uploads-123456789012
+region      = "us-east-1"
+environment = "production"
+
+# --- Optional: WAF association and price class ---------------------------
+# Leave these unset unless you've already associated a WAFv2 web ACL with
+# this distribution outside Terraform (e.g. via the console) and need
+# `terraform plan` to stop proposing to revert it. Before setting
+# cloudfront_web_acl_arn, verify the ACL exists, belongs to your account,
+# and is genuinely associated with this distribution:
+#   aws wafv2 get-web-acl --scope CLOUDFRONT --region us-east-1 --name <name> --id <id>
+#   aws cloudfront get-distribution-config --id <distribution-id>
+# cloudfront_price_class = "PriceClass_100"
+# cloudfront_web_acl_arn = "REPLACE_WITH_YOUR_WAF_ACL_ARN"

@@ -58,12 +58,17 @@ Terraform outputs, or shell history.
 
 Bucket names are global across all of AWS — `bucket_name` defaults to `bsaii-plunk-uploads` in
 `variables.tf`, but that name is already taken, so it does **not** match the real production
-bucket. Production always plans against the committed `production.tfvars`, which pins the actual
-bucket name (`bsaii-plunk-uploads-483528439217`) alongside `region`, `environment`, and
-`cloudfront_price_class`. Never `terraform plan`/`apply` against production with ad-hoc `-var`
+bucket. Production always plans against a local `production.tfvars` (copy `production.tfvars.example`
+and fill in `bucket_name` with your account's actual bucket name, alongside `region`, `environment`,
+and `cloudfront_price_class`). Never `terraform plan`/`apply` against production with ad-hoc `-var`
 flags or with no var file — either falls back to the mismatched default and plans a destructive
 replacement of the S3 bucket and OAC (which `prevent_destroy` will then block, but you don't want
-to get that far). `production.tfvars` contains no credentials, so it's safe to commit.
+to get that far).
+
+`production.tfvars` contains no credentials, but it does pin account-specific identifiers (bucket
+name, WAF ACL ARN) that shouldn't be public — it's gitignored (`*.tfvars` in the root `.gitignore`)
+and must never be committed. Only `production.tfvars.example` (placeholders only) is tracked in
+git.
 
 State locking requires a DynamoDB table to already exist (see `versions.tf` for the exact
 `aws dynamodb create-table` command and the Terraform-1.10+ native-locking alternative).
@@ -88,14 +93,13 @@ For a new/non-production environment with its own bucket name, either add a matc
 
 ### WAF association and price class (`production.tfvars`)
 
-Production's `cloudfront_price_class` is `PriceClass_All` and `cloudfront_web_acl_arn` points at
-an existing WAFv2 web ACL (`CreatedByCloudFront-e2444887`), matching state that was previously
-changed outside Terraform. **This was not independently verified against the AWS account** by
-whoever last edited `production.tfvars` — before trusting it, confirm directly:
+If your distribution's `cloudfront_price_class` or `cloudfront_web_acl_arn` were previously changed
+outside Terraform (e.g. via the console), pin the observed values in your local `production.tfvars`
+so `terraform plan` stops proposing to revert them. Before trusting a `cloudfront_web_acl_arn` you
+didn't set yourself, confirm it directly against your AWS account:
 
 ```bash
-aws wafv2 get-web-acl --scope CLOUDFRONT --region us-east-1 \
-  --name CreatedByCloudFront-e2444887 --id 40ed8f03-9dbd-43ea-9787-59e656e884aa
+aws wafv2 get-web-acl --scope CLOUDFRONT --region us-east-1 --name <name> --id <id>
 aws cloudfront get-distribution-config --id <distribution-id>   # check WebACLId and PriceClass
 ```
 
