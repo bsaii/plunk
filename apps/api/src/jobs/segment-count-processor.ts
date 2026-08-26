@@ -72,46 +72,63 @@ async function processProjectSegments(projectId: string, projectName?: string): 
 }
 
 /**
+ * Update segment counts for a specific project, or (when omitted) every active
+ * project. Shared by the BullMQ worker callback and the maintenance Cloud Run
+ * Job CLI entrypoint.
+ */
+export async function runSegmentCountJob(projectId?: string): Promise<void> {
+  if (projectId) {
+    // Process specific project
+    await processProjectSegments(projectId);
+    return;
+  }
+
+  // Process all active projects
+  const projects = await prisma.project.findMany({
+    where: {disabled: false},
+    select: {id: true, name: true},
+  });
+
+  signale.info(`[SEGMENT-COUNT-WORKER] Processing ${projects.length} active projects`);
+
+  // Process projects in batches to avoid overwhelming the database
+  const PROJECT_BATCH_SIZE = 10;
+  for (let i = 0; i < projects.length; i += PROJECT_BATCH_SIZE) {
+    const batch = projects.slice(i, i + PROJECT_BATCH_SIZE);
+
+    await Promise.all(
+      batch.map(async project => {
+        try {
+          await processProjectSegments(project.id, project.name);
+        } catch (error) {
+          signale.error(`[SEGMENT-COUNT-WORKER] Failed to process project ${project.id}:`, error);
+          // Don't throw - continue with other projects
+        }
+      }),
+    );
+
+    // Small delay between project batches to avoid overwhelming the database
+    if (i + PROJECT_BATCH_SIZE < projects.length) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }
+}
+
+/**
  * Process segment count update job
  */
-async function processSegmentCountUpdate(job: Job<SegmentCountJobData>): Promise<void> {
-  const {projectId} = job.data;
+async function processSegmentCountUpdate(
+  job: Job<SegmentCountJobData>,
+): Promise<{added: number; removed: number; total: number} | void> {
+  const {projectId, segmentId} = job.data;
 
   try {
-    if (projectId) {
-      // Process specific project
-      await processProjectSegments(projectId);
-    } else {
-      // Process all active projects
-      const projects = await prisma.project.findMany({
-        where: {disabled: false},
-        select: {id: true, name: true},
-      });
-
-      signale.info(`[SEGMENT-COUNT-WORKER] Processing ${projects.length} active projects`);
-
-      // Process projects in batches to avoid overwhelming the database
-      const PROJECT_BATCH_SIZE = 10;
-      for (let i = 0; i < projects.length; i += PROJECT_BATCH_SIZE) {
-        const batch = projects.slice(i, i + PROJECT_BATCH_SIZE);
-
-        await Promise.all(
-          batch.map(async project => {
-            try {
-              await processProjectSegments(project.id, project.name);
-            } catch (error) {
-              signale.error(`[SEGMENT-COUNT-WORKER] Failed to process project ${project.id}:`, error);
-              // Don't throw - continue with other projects
-            }
-          }),
-        );
-
-        // Small delay between project batches to avoid overwhelming the database
-        if (i + PROJECT_BATCH_SIZE < projects.length) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        }
-      }
+    if (projectId && segmentId) {
+      // Single-segment fast path (e.g. from a user-triggered "recompute" request)
+      return await SegmentService.computeMembership(projectId, segmentId);
     }
+
+    await runSegmentCountJob(projectId);
   } catch (error) {
     signale.error(`[SEGMENT-COUNT-WORKER] Error processing job ${job.id}:`, error);
     throw error; // Re-throw to trigger retry
@@ -125,7 +142,7 @@ export function createSegmentCountWorker(): Worker {
   const worker = new Worker<SegmentCountJobData>(
     segmentCountQueue.name,
     async (job: Job<SegmentCountJobData>) => {
-      await processSegmentCountUpdate(job);
+      return processSegmentCountUpdate(job);
     },
     {
       connection: segmentCountQueue.opts.connection,
@@ -146,4 +163,18 @@ export function createSegmentCountWorker(): Worker {
   });
 
   return worker;
+}
+
+// If running this file directly (for testing or manual execution)
+if (import.meta.url === `file://${process.argv[1]}`) {
+  signale.info('[SEGMENT-COUNT-WORKER] Running segment count job manually...');
+  runSegmentCountJob()
+    .then(() => {
+      signale.success('[SEGMENT-COUNT-WORKER] Completed successfully');
+      process.exit(0);
+    })
+    .catch(error => {
+      signale.error('[SEGMENT-COUNT-WORKER] Fatal error:', error);
+      process.exit(1);
+    });
 }

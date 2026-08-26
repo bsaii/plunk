@@ -8,6 +8,7 @@
  */
 export interface SegmentCountJobData {
   projectId?: string; // Optional: if provided, only update this project's segments
+  segmentId?: string; // Optional: if provided (with projectId), only compute this single segment
 }
 
 /**

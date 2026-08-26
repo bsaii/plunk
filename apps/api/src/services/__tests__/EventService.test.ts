@@ -2,6 +2,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {WorkflowExecutionStatus, WorkflowTriggerType} from '@plunk/db';
 import {EventService} from '../EventService';
 import {Keys} from '../keys';
+import {QueueService} from '../QueueService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 // Mock Redis for caching tests - must be inline to avoid hoisting issues
@@ -104,58 +105,76 @@ describe('EventService', () => {
       expect(event.contactId).toBe(contact.id);
     });
 
-    it('should trigger workflows listening for the event', async () => {
-      const contact = await factories.createContact({projectId});
+    it('should trigger workflows listening for the event by enqueueing the trigger step, not executing inline', async () => {
+      const queueWorkflowStepSpy = vi
+        .spyOn(QueueService, 'queueWorkflowStep')
+        .mockResolvedValue({id: 'mock-job-id'} as unknown as Awaited<ReturnType<typeof QueueService.queueWorkflowStep>>);
 
-      // Create workflow triggered by 'purchase.completed' event
-      const workflow = await factories.createWorkflow({
-        projectId,
-        enabled: true,
-        triggerType: WorkflowTriggerType.EVENT,
-        triggerConfig: {eventName: 'purchase.completed'},
-      });
+      try {
+        const contact = await factories.createContact({projectId});
 
-      // Add a delay step so workflow doesn't complete immediately
-      const triggerStep = await prisma.workflowStep.findFirst({
-        where: {workflowId: workflow.id, type: 'TRIGGER'},
-      });
+        // Create workflow triggered by 'purchase.completed' event
+        const workflow = await factories.createWorkflow({
+          projectId,
+          enabled: true,
+          triggerType: WorkflowTriggerType.EVENT,
+          triggerConfig: {eventName: 'purchase.completed'},
+        });
 
-      const delayStep = await prisma.workflowStep.create({
-        data: {
-          workflowId: workflow.id,
-          type: 'DELAY',
-          name: 'Wait',
-          position: {x: 100, y: 0},
-          config: {amount: 24, unit: 'hours'},
-        },
-      });
+        // Add a delay step so workflow doesn't complete immediately
+        const triggerStep = await prisma.workflowStep.findFirst({
+          where: {workflowId: workflow.id, type: 'TRIGGER'},
+        });
 
-      // Connect steps
-      await prisma.workflowTransition.create({
-        data: {
-          fromStepId: triggerStep!.id,
-          toStepId: delayStep.id,
-        },
-      });
+        const delayStep = await prisma.workflowStep.create({
+          data: {
+            workflowId: workflow.id,
+            type: 'DELAY',
+            name: 'Wait',
+            position: {x: 100, y: 0},
+            config: {amount: 24, unit: 'hours'},
+          },
+        });
 
-      // Track the event
-      await EventService.trackEvent(projectId, 'purchase.completed', contact.id, undefined, {
-        amount: 99.99,
-        product: 'Premium Plan',
-      });
+        // Connect steps
+        await prisma.workflowTransition.create({
+          data: {
+            fromStepId: triggerStep!.id,
+            toStepId: delayStep.id,
+          },
+        });
 
-      // Verify workflow execution was created
-      const executions = await prisma.workflowExecution.findMany({
-        where: {
-          workflowId: workflow.id,
-          contactId: contact.id,
-        },
-      });
+        // Track the event - this must return promptly without executing the
+        // workflow inline, regardless of how many steps the workflow has.
+        await EventService.trackEvent(projectId, 'purchase.completed', contact.id, undefined, {
+          amount: 99.99,
+          product: 'Premium Plan',
+        });
 
-      expect(executions).toHaveLength(1);
-      // Workflow should be in COMPLETED status since DELAY step completes and has no next step
-      // (DELAY sets to WAITING then processNextSteps sees no transitions and completes it)
-      expect([WorkflowExecutionStatus.WAITING, WorkflowExecutionStatus.COMPLETED]).toContain(executions[0].status);
+        // Verify workflow execution was created
+        const executions = await prisma.workflowExecution.findMany({
+          where: {
+            workflowId: workflow.id,
+            contactId: contact.id,
+          },
+        });
+
+        expect(executions).toHaveLength(1);
+        // The trigger step is queued for async processing, not executed inline -
+        // the execution stays RUNNING at the trigger step until the queued job runs.
+        expect(executions[0].status).toBe(WorkflowExecutionStatus.RUNNING);
+        expect(executions[0].currentStepId).toBe(triggerStep!.id);
+
+        expect(queueWorkflowStepSpy).toHaveBeenCalledWith(executions[0].id, triggerStep!.id);
+
+        // No step executions should have been created yet - that's the queued job's job.
+        const stepExecutions = await prisma.workflowStepExecution.findMany({
+          where: {executionId: executions[0].id},
+        });
+        expect(stepExecutions).toHaveLength(0);
+      } finally {
+        queueWorkflowStepSpy.mockRestore();
+      }
     });
 
     it('should NOT start a workflow for a contact from another project', async () => {

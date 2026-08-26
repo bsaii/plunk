@@ -78,16 +78,38 @@ export const idempotency = async (req: Request, res: Response, next: NextFunctio
       throw error;
     }
 
-    res.on('finish', () => {
+    // Settle the claim (release on 4xx, keep with a status code otherwise) before the
+    // response is actually flushed, rather than in a `res.on('finish', ...)` handler
+    // that runs after - which risks silent loss under Cloud Run's CPU-throttle-
+    // after-response billing model. `res.end` is the lowest-level method that every
+    // response path (json/send/end) funnels through, so overriding it covers all of them.
+    const originalEnd = res.end.bind(res);
+    let settled = false;
+
+    res.end = ((...args: unknown[]) => {
+      if (settled) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (originalEnd as any)(...args);
+      }
+      settled = true;
+
       const settle =
         res.statusCode >= 400 && res.statusCode < 500
           ? prisma.idempotencyKey.delete({where: {id: claimId}})
           : prisma.idempotencyKey.update({where: {id: claimId}, data: {statusCode: res.statusCode}});
 
-      settle.catch((error: unknown) => {
-        signale.error(`[IDEMPOTENCY] Failed to settle key claim ${claimId}:`, error);
-      });
-    });
+      settle
+        .catch((error: unknown) => {
+          signale.error(`[IDEMPOTENCY] Failed to settle key claim ${claimId}:`, error);
+        })
+        .finally(() => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (originalEnd as any)(...args);
+        });
+
+      return res;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any;
 
     return next();
   } catch (error) {

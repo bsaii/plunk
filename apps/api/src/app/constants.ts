@@ -80,6 +80,13 @@ export const REDIS_URL = validateEnv('REDIS_URL');
 export const DATABASE_URL = validateEnv('DATABASE_URL');
 export const DIRECT_DATABASE_URL = validateEnv('DIRECT_DATABASE_URL');
 
+// Queue backend for the 5 scheduled maintenance jobs (domain verification, segment counts, and
+// the 3 cleanup sweeps). Defaults to 'bullmq' — self-hosted deployments keep registering these as
+// in-process BullMQ repeatable jobs exactly as before (see app.ts). 'cloud-tasks' is reserved for
+// the GCP deployment's Cloud Scheduler + Cloud Run Job migration (terraform/gcp/maintenance.tf) —
+// only the 'bullmq' branch is meaningful until that work lands.
+export const QUEUE_BACKEND = validateEnv('QUEUE_BACKEND', 'bullmq') as 'bullmq' | 'cloud-tasks';
+
 // OAuth (optional - for social login)
 export const GITHUB_OAUTH_CLIENT = validateEnv('GITHUB_OAUTH_CLIENT', '');
 export const GITHUB_OAUTH_SECRET = validateEnv('GITHUB_OAUTH_SECRET', '');

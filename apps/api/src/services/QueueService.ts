@@ -438,16 +438,57 @@ export class QueueService {
   }
 
   /**
-   * Queue segment count update job
+   * Queue segment count update job.
+   * Pass both projectId and segmentId to compute a single segment's membership.
    */
-  public static async queueSegmentCountUpdate(projectId?: string): Promise<Job<SegmentCountJobData>> {
+  public static async queueSegmentCountUpdate(
+    projectId?: string,
+    segmentId?: string,
+  ): Promise<Job<SegmentCountJobData>> {
     return segmentCountQueue.add(
       'update-segment-counts',
-      {projectId},
+      {projectId, segmentId},
       {
-        jobId: projectId ? `segment-count-${projectId}-${Date.now()}` : `segment-count-all-${Date.now()}`,
+        jobId: segmentId
+          ? `segment-count-${segmentId}-${Date.now()}`
+          : projectId
+            ? `segment-count-${projectId}-${Date.now()}`
+            : `segment-count-all-${Date.now()}`,
       },
     );
+  }
+
+  /**
+   * Get the status of a queued segment compute job
+   * @param jobId - The BullMQ job ID
+   * @param projectId - The project ID to verify authorization
+   * @returns Job status or null if not found or unauthorized
+   */
+  public static async getSegmentComputeJobStatus(jobId: string, projectId: string) {
+    const job = await segmentCountQueue.getJob(jobId);
+
+    if (!job) {
+      return null;
+    }
+
+    // Security: Verify that the job belongs to the requesting project
+    if (job.data.projectId !== projectId) {
+      return null;
+    }
+
+    const state = await job.getState();
+    const progress = job.progress;
+    const returnValue = job.returnvalue;
+    const failedReason = job.failedReason;
+
+    return {
+      id: job.id,
+      state,
+      progress,
+      result: returnValue,
+      data: job.data,
+      failedReason,
+    };
   }
 
   /**

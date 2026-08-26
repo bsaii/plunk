@@ -1,5 +1,4 @@
 import type {Request, Response} from 'express';
-import {EventEmitter} from 'node:events';
 import {beforeEach, describe, expect, it, vi} from 'vitest';
 
 import {factories, getPrismaClient} from '../../../../../test/helpers';
@@ -7,13 +6,17 @@ import {ErrorCode, HttpException} from '../../exceptions/index.js';
 import {idempotency} from '../idempotency.js';
 
 /**
- * Minimal Response stand-in: the middleware only needs res.locals and the
- * 'finish' event, which it uses to settle the claim once the handler responds.
+ * Minimal Response stand-in: the middleware only needs res.locals and res.end,
+ * which it overrides to settle the claim before the response is actually sent.
  */
 function createResponse(projectId: string) {
-  const res = new EventEmitter() as unknown as Response & {statusCode: number};
-  res.locals = {auth: {type: 'secret', projectId}};
-  res.statusCode = 200;
+  const res = {
+    locals: {auth: {type: 'secret', projectId}},
+    statusCode: 200,
+    end: vi.fn(function (this: Response) {
+      return this;
+    }),
+  } as unknown as Response & {statusCode: number; end: ReturnType<typeof vi.fn>};
   return res;
 }
 
@@ -32,10 +35,10 @@ function run(req: Request, res: Response): Promise<unknown> {
   });
 }
 
-/** The claim is settled in a 'finish' listener that we deliberately do not await. */
-async function respond(res: Response & {statusCode: number}, statusCode: number) {
+/** The claim is settled by the middleware's res.end override before it calls through. */
+async function respond(res: Response & {statusCode: number; end: ReturnType<typeof vi.fn>}, statusCode: number) {
   res.statusCode = statusCode;
-  res.emit('finish');
+  res.end();
   await vi.waitFor(async () => {
     // Settled means the row is either gone (4xx) or has a statusCode written.
     const rows = await getPrismaClient().idempotencyKey.findMany({where: {statusCode: null}});

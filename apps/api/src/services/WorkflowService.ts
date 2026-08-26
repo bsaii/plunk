@@ -2,7 +2,6 @@ import type {Workflow, WorkflowExecution, WorkflowStep, WorkflowTransition} from
 import {Prisma, WorkflowExecutionStatus} from '@plunk/db';
 import type {PaginatedResponse, WorkflowExecutionWithDetails, WorkflowWithDetails} from '@plunk/types';
 import {toPrismaJson} from '@plunk/types';
-import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
@@ -11,7 +10,7 @@ import type {ListSort} from '../utils/listSort.js';
 import {ContactService} from './ContactService.js';
 import {EventService} from './EventService.js';
 import {NtfyService} from './NtfyService.js';
-import {WorkflowExecutionService} from './WorkflowExecutionService.js';
+import {QueueService} from './QueueService.js';
 
 export class WorkflowService {
   /**
@@ -1187,11 +1186,10 @@ export class WorkflowService {
       },
     });
 
-    // Start executing the workflow asynchronously
-    // Don't await - let it run in background
-    WorkflowExecutionService.processStepExecution(execution.id, triggerStep.id).catch(error => {
-      signale.error('Error executing workflow:', error);
-    });
+    // Queue the workflow's trigger step for async execution and wait for it to be
+    // enqueued (not for the workflow to finish) - avoids truncated background work
+    // under Cloud Run's CPU-throttle-after-response billing model.
+    await QueueService.queueWorkflowStep(execution.id, triggerStep.id);
 
     return execution;
   }

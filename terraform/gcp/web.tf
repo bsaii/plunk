@@ -1,5 +1,9 @@
 # plunk-web — no min instances: the dashboard is stateless and fine scaling
 # to zero (a cold start costs a few seconds on the first request after idle).
+# cpu_idle = true (request-based billing) is made explicit rather than left
+# to the provider default, same reasoning as plunk-api (see that file) —
+# this service never ran the fire-and-forget-after-response code paths
+# Phase 0 fixed there, so nothing blocked doing this immediately.
 # Public internet ingress, same reasoning as plunk-api (see that file) —
 # Cloudflare proxies web_domain straight to this service via dns.tf's domain
 # mapping instead of a GCP load balancer.
@@ -35,6 +39,7 @@ resource "google_cloud_run_v2_service" "web" {
           cpu    = var.web_cpu
           memory = var.web_memory
         }
+        cpu_idle = true
       }
 
       ports {

@@ -14,9 +14,10 @@
 #
 # Then build the individual service images:
 #
-#   docker build --target api-runner    -t plunk-api:${PLUNK_VERSION}    -f Dockerfile.services .
-#   docker build --target worker-runner -t plunk-worker:${PLUNK_VERSION} -f Dockerfile.services .
-#   docker build --target web-runner    -t plunk-web:${PLUNK_VERSION}    -f Dockerfile.services .
+#   docker build --target api-runner         -t plunk-api:${PLUNK_VERSION}         -f Dockerfile.services .
+#   docker build --target worker-runner      -t plunk-worker:${PLUNK_VERSION}      -f Dockerfile.services .
+#   docker build --target maintenance-runner -t plunk-maintenance:${PLUNK_VERSION} -f Dockerfile.services .
+#   docker build --target web-runner         -t plunk-web:${PLUNK_VERSION}         -f Dockerfile.services .
 #
 # The API/worker read all configuration (including the *_URI values) from the
 # environment at runtime. Database migrations are not run automatically; run
@@ -98,6 +99,17 @@ CMD ["node", "apps/api/dist/app.js"]
 # =============================================================================
 FROM api-runner AS worker-runner
 CMD ["node", "apps/api/dist/jobs/worker.js"]
+
+# =============================================================================
+# Maintenance Cloud Run Job (same runtime as the API, different entrypoint)
+#
+# Serves all 5 scheduled maintenance tasks (domain verification, segment counts,
+# and the 3 cleanup sweeps) - Cloud Scheduler supplies which one to run per
+# invocation via a `--task=<name>` container args override, so this image has
+# no default task baked in. See terraform/gcp/maintenance.tf.
+# =============================================================================
+FROM api-runner AS maintenance-runner
+CMD ["node", "apps/api/dist/jobs/maintenance-runner.js"]
 
 # =============================================================================
 # Web dashboard (Next.js standalone)

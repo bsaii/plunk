@@ -367,7 +367,7 @@ export class WorkflowExecutionService {
         },
       });
 
-      await this.processStepExecution(stepExecution.executionId, fallbackTransition.toStep.id);
+      await QueueService.queueWorkflowStep(stepExecution.executionId, fallbackTransition.toStep.id);
     } else if (transitions.length > 0) {
       // No timeout branch, follow first transition
       const firstTransition = transitions[0];
@@ -381,7 +381,7 @@ export class WorkflowExecutionService {
           },
         });
 
-        await this.processStepExecution(stepExecution.executionId, nextStep.id);
+        await QueueService.queueWorkflowStep(stepExecution.executionId, nextStep.id);
       }
     } else {
       // No transitions, complete workflow
@@ -1267,9 +1267,9 @@ export class WorkflowExecutionService {
       },
     });
 
-    // Process the next step
-    // All steps are processed immediately - DELAY and WAIT_FOR_EVENT will pause the workflow internally
-    await this.processStepExecution(execution.id, nextStep.id);
+    // Queue the next step rather than executing it inline - keeps each HTTP-triggered
+    // workflow run bounded to one step per job instead of a synchronous recursive cascade.
+    await QueueService.queueWorkflowStep(execution.id, nextStep.id);
   }
 
   /**

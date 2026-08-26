@@ -18,9 +18,10 @@ const RETENTION_DAYS = 90;
 const BATCH_SIZE = 1000; // Update in batches to avoid long-held row locks
 
 /**
- * Process email body cleanup job
+ * Blank the rendered HTML body of emails past the retention window. Shared by the
+ * BullMQ worker callback and the maintenance Cloud Run Job CLI entrypoint.
  */
-async function processCleanup(job: Job<EmailBodyCleanupJobData>): Promise<{cleared: number}> {
+export async function runEmailBodyCleanupJob(): Promise<{cleared: number}> {
   signale.info('[EMAIL-BODY-CLEANUP] Starting cleanup of email bodies past retention...');
 
   const cutoffDate = new Date();
@@ -60,13 +61,23 @@ async function processCleanup(job: Job<EmailBodyCleanupJobData>): Promise<{clear
       `[EMAIL-BODY-CLEANUP] Cleanup complete. Cleared ${totalCleared} bodies older than ${RETENTION_DAYS} days (before ${cutoffDate.toISOString()})`,
     );
 
-    await job.updateProgress(100);
-
     return {cleared: totalCleared};
   } catch (error) {
     signale.error('[EMAIL-BODY-CLEANUP] Error during cleanup:', error);
     throw error;
   }
+}
+
+/**
+ * Process email body cleanup job
+ */
+async function processCleanup(job: Job<EmailBodyCleanupJobData>): Promise<{cleared: number}> {
+  const result = await runEmailBodyCleanupJob();
+
+  // Update job progress (no-op outside of a BullMQ worker context)
+  await job.updateProgress(100);
+
+  return result;
 }
 
 /**
@@ -107,4 +118,18 @@ function parseRedisUrl(url: string): {host: string; port: number; password?: str
     password: urlObj.password || undefined,
     db: parseInt(urlObj.pathname.slice(1) || '0', 10),
   };
+}
+
+// If running this file directly (for testing or manual execution)
+if (import.meta.url === `file://${process.argv[1]}`) {
+  signale.info('[EMAIL-BODY-CLEANUP] Running email body cleanup job manually...');
+  runEmailBodyCleanupJob()
+    .then(() => {
+      signale.success('[EMAIL-BODY-CLEANUP] Completed successfully');
+      process.exit(0);
+    })
+    .catch(error => {
+      signale.error('[EMAIL-BODY-CLEANUP] Fatal error:', error);
+      process.exit(1);
+    });
 }

@@ -109,6 +109,14 @@ Callers can pass an `Idempotency-Key` header to `POST /v1/track` and `POST /v1/s
 | -------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `IDEMPOTENCY_KEY_TTL_HOURS` | No       | How long a used key stays claimed before it can be reused. Expired keys are swept hourly, so raising this grows the `idempotency_keys` table proportionally. | `24`    |
 
+## Background Jobs
+
+Selects how the 5 scheduled maintenance jobs (domain verification, segment counts, and the API request / idempotency-key / email-body cleanup sweeps) are run.
+
+| Variable        | Required | Description                                                                                                                                                                                                                                | Default |
+| --------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `QUEUE_BACKEND` | No       | Self-hosted deployments should leave this unset — `bullmq` runs the maintenance jobs as in-process BullMQ repeatable jobs against the worker container from `docker-compose.yml`, exactly as today. `cloud-tasks` is reserved for Plunk's own GCP deployment (Cloud Scheduler + a dedicated Cloud Run Job) and is not a supported self-hosting configuration. | `bullmq` |
+
 ## SMTP Server
 
 The optional SMTP relay lets you send emails through Plunk via the SMTP protocol.

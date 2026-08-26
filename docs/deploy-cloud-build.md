@@ -1,12 +1,12 @@
-# Building and deploying api + web + worker with Cloud Build
+# Building and deploying api + web + worker + maintenance with Cloud Build
 
-`cloudbuild.yaml` (repo root) builds the `api`, `web` and `worker` images from
+`cloudbuild.yaml` (repo root) builds the `api`, `web`, `worker` and `maintenance` images from
 `Dockerfile.services`, pushes them to Artifact Registry, updates the `plunk-api` and `plunk-web`
-Cloud Run services, keeps the `plunk-migrate` Cloud Run Job pointed at the same api image, and
-updates the `plunk-worker` Cloud Run Worker Pool — all on Google's build infrastructure. Use this
-instead of running `docker build` in Cloud Shell: the monorepo build (installing dependencies and
-compiling every app) is big enough to fill Cloud Shell's small local disk, and Cloud Build doesn't
-have that limit.
+Cloud Run services, keeps the `plunk-migrate` and `plunk-maintenance` Cloud Run Jobs pointed at the
+same api image, and updates the `plunk-worker` Cloud Run Worker Pool — all on Google's build
+infrastructure. Use this instead of running `docker build` in Cloud Shell: the monorepo build
+(installing dependencies and compiling every app) is big enough to fill Cloud Shell's small local
+disk, and Cloud Build doesn't have that limit.
 
 `landing` and `wiki` aren't wired up yet — they're still only built as part of the all-in-one
 image (`Dockerfile`). Adding them later is the same shape: another `build` → `push` → `deploy`
@@ -22,6 +22,14 @@ runs doesn't turn BuildKit on by default, so every `docker build` step in `cloud
 continuously-running background processes with no HTTP entrypoint. `terraform/gcp/worker.tf`
 creates the pool itself (scaling, service account, secrets); this pipeline only ever updates its
 image, same fail-fast-if-missing pattern as `update-migrate-job`.
+
+**The 5 scheduled maintenance tasks (domain verification, segment counts, and the 3 cleanup
+sweeps) deploy as a single `plunk-maintenance` Cloud Run Job** (`build-maintenance` /
+`push-maintenance` / `update-maintenance-job` steps), off the same api image with a different
+entrypoint (`apps/api/src/jobs/maintenance-runner.ts`). `terraform/gcp/maintenance.tf` creates the
+job and the 5 Cloud Scheduler entries that actually run it, each on its own cron schedule with its
+own `--task=<name>` override — this pipeline, same as `plunk-migrate`, only ever updates the job's
+image and never executes it.
 
 APIs, the Artifact Registry repo, runtime service accounts, and every IAM grant Cloud Build needs
 are now managed declaratively in `terraform/gcp/` (`services.tf` / `iam.tf`) rather than via
@@ -47,18 +55,22 @@ gcloud artifacts repositories list
 # Do you already have Cloud Run services? What are they named?
 gcloud run services list --region=YOUR_REGION
 
-# Do you already have the plunk-migrate Cloud Run Job?
+# Do you already have the plunk-migrate and plunk-maintenance Cloud Run Jobs?
 gcloud run jobs list --region=YOUR_REGION
 
 # Do you already have the plunk-worker Worker Pool? (should already exist if
 # you've run `terraform apply` — see terraform/gcp/worker.tf)
 gcloud run worker-pools list --region=YOUR_REGION
+
+# Do you already have the 5 Cloud Scheduler jobs that trigger plunk-maintenance?
+# (should already exist if you've run `terraform apply` — see terraform/gcp/maintenance.tf)
+gcloud scheduler jobs list --location=YOUR_REGION
 ```
 
 Then open `cloudbuild.yaml` and edit the `substitutions` block at the top so `_REGION`,
-`_AR_REPO`, `_API_SERVICE`, `_WEB_SERVICE`, `_MIGRATE_JOB` and `_WORKER_POOL` match what you
-found — or leave the file alone and pass them on the command line instead (shown below),
-whichever is easier to keep straight.
+`_AR_REPO`, `_API_SERVICE`, `_WEB_SERVICE`, `_MIGRATE_JOB`, `_MAINTENANCE_JOB` and `_WORKER_POOL`
+match what you found — or leave the file alone and pass them on the command line instead (shown
+below), whichever is easier to keep straight.
 
 ## One-time setup
 
@@ -88,16 +100,17 @@ CB_SA="plunk-cloud-build@$(gcloud config get-value project).iam.gserviceaccount.
 
 #    Then grant it what it needs — managed by terraform/gcp/iam.tf, shown here
 #    for reference. roles/run.admin covers Cloud Run services (plunk-api,
-#    plunk-web), Cloud Run Jobs (plunk-migrate), and Worker Pools
-#    (plunk-worker), since they're all under the same run.googleapis.com API.
-#    roles/logging.logWriter is required for any *non-default* build service
-#    account to write build logs under `options.logging: CLOUD_LOGGING_ONLY`
-#    (the legacy default account gets this for free; a user-managed one does
-#    not). roles/iam.serviceAccountUser must be scoped per runtime service
-#    account (iam.tf grants it on each of plunk-api-run/plunk-web-run/
-#    plunk-migrate-run/plunk-worker-run individually, not project-wide) since
-#    deploying a revision that runs as a non-default service account requires
-#    the deployer to be able to "act as" it.
+#    plunk-web), Cloud Run Jobs (plunk-migrate, plunk-maintenance), and
+#    Worker Pools (plunk-worker), since they're all under the same
+#    run.googleapis.com API. roles/logging.logWriter is required for any
+#    *non-default* build service account to write build logs under
+#    `options.logging: CLOUD_LOGGING_ONLY` (the legacy default account gets
+#    this for free; a user-managed one does not). roles/iam.serviceAccountUser
+#    must be scoped per runtime service account (iam.tf grants it on each of
+#    plunk-api-run/plunk-web-run/plunk-migrate-run/plunk-worker-run/
+#    plunk-maintenance-run individually, not project-wide) since deploying a
+#    revision that runs as a non-default service account requires the
+#    deployer to be able to "act as" it.
 gcloud projects add-iam-policy-binding "$(gcloud config get-value project)" \
   --member="serviceAccount:${CB_SA}" --role="roles/artifactregistry.writer"
 
@@ -125,9 +138,9 @@ or set `serviceAccount` on the Cloud Build Trigger (see the continuous-deploymen
 so every trigger-fired build uses it automatically.
 
 ```bash
-# 3. The Cloud Run services/job/worker pool themselves — superseded by
-#    `terraform apply` in terraform/gcp/ (api.tf/web.tf/migrate.tf/worker.tf
-#    create all four on a fresh project, with real scaling/env
+# 3. The Cloud Run services/jobs/worker pool themselves — superseded by
+#    `terraform apply` in terraform/gcp/ (api.tf/web.tf/migrate.tf/worker.tf/
+#    maintenance.tf create all five on a fresh project, with real scaling/env
 #    vars/secrets/service accounts from the start). Kept here for reference
 #    / for anyone not using that Terraform yet. `gcloud run deploy
 #    --image=...` (what cloudbuild.yaml runs) is normally create-or-update,
@@ -192,6 +205,20 @@ gcloud run jobs create plunk-migrate \
   --command="node_modules/.bin/prisma" \
   --args="migrate,deploy,--schema=packages/db/prisma/schema.prisma" \
   --set-env-vars="DATABASE_URL=...,DIRECT_DATABASE_URL=..."
+
+# plunk-maintenance (the Cloud Run Job that runs the 5 scheduled maintenance
+# tasks off the api image, dispatched via a --task=<name> arg) is assumed to
+# already exist too — cloudbuild.yaml only ever updates its image, it never
+# creates the job or the Cloud Scheduler entries that trigger it (those are
+# terraform/gcp/maintenance.tf's job). If the job itself doesn't exist yet:
+gcloud run jobs create plunk-maintenance \
+  --image="us-central1-docker.pkg.dev/$(gcloud config get-value project)/plunk/maintenance:bootstrap" \
+  --region=us-central1 \
+  --set-env-vars="DATABASE_URL=...,DIRECT_DATABASE_URL=...,REDIS_URL=...,AWS_SES_REGION=...,AWS_SES_ACCESS_KEY_ID=...,AWS_SES_SECRET_ACCESS_KEY=...,DASHBOARD_URI=...,LANDING_URI=...,JWT_SECRET=..."
+# (no --command/--args here — maintenance-runner.ts dispatches on a --task=
+#  arg supplied per-invocation by each Cloud Scheduler entry, not baked into
+#  the job's static template. Running this job directly without one fails
+#  loud by design.)
 
 # plunk-worker (the Worker Pool running the BullMQ queue consumers) is
 # assumed to already exist too — cloudbuild.yaml's update-worker-pool step
@@ -264,12 +291,13 @@ gcloud builds submit \
   --substitutions=_TAG=$(git rev-parse --short HEAD)
 ```
 
-That single command builds all three images tagged with the current commit's short SHA, pushes
+That single command builds all four images tagged with the current commit's short SHA, pushes
 them to Artifact Registry, rolls `plunk-api` and `plunk-web` over to the new images, updates
-`plunk-worker` to the same new worker image, and points
-`plunk-migrate` at the same new api image — nothing else about any of their configuration (env
-vars, secrets, scaling settings) is touched, and the migrate job is only *updated*, never
-executed automatically.
+`plunk-worker` to the same new worker image, and points both `plunk-migrate` and
+`plunk-maintenance` at the same new api image — nothing else about any of their configuration (env
+vars, secrets, scaling settings) is touched, and both jobs are only *updated*, never executed
+automatically (Cloud Scheduler is what actually runs `plunk-maintenance`, on its own per-task
+schedule — see `terraform/gcp/maintenance.tf`).
 
 If this build introduced new migrations, run them yourself once you're ready (this is a
 deliberate manual step, not part of the pipeline):
@@ -278,12 +306,19 @@ deliberate manual step, not part of the pipeline):
 gcloud run jobs execute plunk-migrate --region=us-central1 --wait
 ```
 
+To force one of the 5 maintenance tasks to run immediately instead of waiting for its schedule
+(e.g. to smoke-test after a deploy):
+
+```bash
+gcloud scheduler jobs run plunk-maintenance-domain-verification --location=us-central1
+```
+
 Override any of the location substitutions the same way, if you didn't edit the defaults in
 the file:
 
 ```bash
 gcloud builds submit --config=cloudbuild.yaml \
-  --substitutions=_TAG=$(git rev-parse --short HEAD),_REGION=europe-west1,_AR_REPO=plunk,_API_SERVICE=plunk-api,_WEB_SERVICE=plunk-web,_WORKER_POOL=plunk-worker
+  --substitutions=_TAG=$(git rev-parse --short HEAD),_REGION=europe-west1,_AR_REPO=plunk,_API_SERVICE=plunk-api,_WEB_SERVICE=plunk-web,_WORKER_POOL=plunk-worker,_MAINTENANCE_JOB=plunk-maintenance
 ```
 
 ## Continuous deployment: wiring GitHub to Cloud Build
@@ -346,9 +381,9 @@ Console → Cloud Build → History before it actually runs.)
 3. Cloud Build clones the repo at that merge commit, resolves `$SHORT_SHA` to the real commit
    hash, and runs `cloudbuild.yaml` exactly like a manual `gcloud builds submit` — same steps,
    same service account, same IAM.
-4. It builds all three images tagged with that commit, pushes them to Artifact Registry, rolls
+4. It builds all four images tagged with that commit, pushes them to Artifact Registry, rolls
    `plunk-api` and `plunk-web` over to the new images, updates `plunk-worker` to the new worker
-   image, and updates (never executes) `plunk-migrate`'s image.
+   image, and updates (never executes) `plunk-migrate`'s and `plunk-maintenance`'s images.
 5. You watch it in Console → Cloud Build → History, same as any manual run.
 
 One real nuance: steps aren't transactional across the whole build. If `build-web` fails,
@@ -390,9 +425,10 @@ hasn't been created yet — do the one-time bootstrap deploy in step 3 above fir
 don't `waitFor` anything, so they run immediately and fail within seconds rather than after the
 whole (slow) build — you don't have to wait 15+ minutes to find out you skipped a step.
 
-If `deploy-api`, `deploy-web`, or `update-migrate-job` fails with a permissions error, re-check
-step 2 of the one-time setup above — that's almost always a missing IAM role on the Cloud Build
-service account. If a `docker build` step fails complaining about `--mount` or BuildKit, check
+If `deploy-api`, `deploy-web`, `update-migrate-job`, or `update-maintenance-job` fails with a
+permissions error, re-check step 2 of the one-time setup above — that's almost always a missing
+IAM role on the Cloud Build service account. If a `docker build` step fails complaining about
+`--mount` or BuildKit, check
 that step still has `env: ["DOCKER_BUILDKIT=1"]` set (see the BuildKit note above).
 
 If the build fails immediately (before any step even starts) with "if 'build.service_account' is
@@ -404,7 +440,8 @@ this; if you still hit it, you're probably running an older copy of the file —
 
 ## A note on scope
 
-This file does `api`, `web`, and `worker` (as a Cloud Run Worker Pool). `landing` and `wiki`
+This file does `api`, `web`, `worker` (as a Cloud Run Worker Pool), and `maintenance` (as a Cloud
+Run Job triggered by Cloud Scheduler). `landing` and `wiki`
 aren't in `Dockerfile.services` yet — they're still only built as part of the all-in-one image
 (`Dockerfile`). Adding them here later is the same shape as the others: another `build` → `push`
 → `deploy` step chain.
