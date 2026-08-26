@@ -4,15 +4,15 @@
  */
 
 import type {MeterEventJobData} from '@plunk/types';
-import {type Job, Worker} from 'bullmq';
+import {Worker} from 'bullmq';
 import signale from 'signale';
 
 import {STRIPE_ENABLED, STRIPE_METER_EVENT_NAME} from '../app/constants.js';
 import {stripe} from '../app/stripe.js';
 import {meterQueue} from '../services/QueueService.js';
 
-async function processMeterEvent(job: Job<MeterEventJobData>): Promise<void> {
-  const {customerId, value, idempotencyKey} = job.data;
+export async function processMeterJob(data: MeterEventJobData): Promise<void> {
+  const {customerId, value, idempotencyKey} = data;
 
   if (!STRIPE_ENABLED || !stripe) {
     return;
@@ -33,9 +33,7 @@ async function processMeterEvent(job: Job<MeterEventJobData>): Promise<void> {
 export function createMeterWorker(): Worker {
   const worker = new Worker<MeterEventJobData>(
     meterQueue.name,
-    async (job: Job<MeterEventJobData>) => {
-      await processMeterEvent(job);
-    },
+    job => processMeterJob(job.data),
     {
       connection: meterQueue.opts.connection,
       concurrency: 5,

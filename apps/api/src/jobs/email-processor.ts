@@ -5,7 +5,7 @@
 
 import {EmailStatus} from '@plunk/db';
 import type {SendEmailJobData} from '@plunk/types';
-import {type Job, Worker} from 'bullmq';
+import {Worker} from 'bullmq';
 import signale from 'signale';
 
 import {
@@ -71,17 +71,8 @@ function deriveWorkerConcurrency(rateLimit: number): number {
   return Math.max(MIN_CONCURRENCY, Math.min(derived, EMAIL_WORKER_MAX_CONCURRENCY));
 }
 
-export async function createEmailWorker() {
-  // Fetch the rate limit (from env, AWS, or default)
-  const rateLimit = await getEmailRateLimit();
-  const concurrency = deriveWorkerConcurrency(rateLimit);
-  signale.info(
-    `[EMAIL-PROCESSOR] Worker concurrency: ${concurrency} (rate limit: ${rateLimit}/s)`,
-  );
-  const worker = new Worker<SendEmailJobData>(
-    emailQueue.name,
-    async (job: Job<SendEmailJobData>) => {
-      const {emailId} = job.data;
+export async function processEmailJob(data: SendEmailJobData): Promise<void> {
+      const {emailId} = data;
 
       const email = await prisma.email.findUnique({
         where: {id: emailId},
@@ -293,16 +284,17 @@ export async function createEmailWorker() {
 
         throw error; // Re-throw to trigger retry
       }
-    },
-    {
-      connection: emailQueue.opts.connection,
-      concurrency,
-      limiter: {
-        max: rateLimit, // Max emails per second (from env, AWS SES quota, or default)
-        duration: 1000,
-      },
-    },
-  );
+}
+
+export async function createEmailWorker() {
+  const rateLimit = await getEmailRateLimit();
+  const concurrency = deriveWorkerConcurrency(rateLimit);
+  signale.info(`[EMAIL-PROCESSOR] Worker concurrency: ${concurrency} (rate limit: ${rateLimit}/s)`);
+  const worker = new Worker<SendEmailJobData>(emailQueue.name, job => processEmailJob(job.data), {
+    connection: emailQueue.opts.connection,
+    concurrency,
+    limiter: {max: rateLimit, duration: 1000},
+  });
 
   worker.on('completed', job => {
     signale.info(`[EMAIL-PROCESSOR] Job ${job.id} completed`);

@@ -4,7 +4,7 @@
  */
 
 import type {ContactImportJobData} from '@plunk/types';
-import {type Job, Worker} from 'bullmq';
+import {Worker} from 'bullmq';
 import {parse} from 'csv-parse/sync';
 import signale from 'signale';
 
@@ -12,6 +12,7 @@ import {prisma} from '../database/prisma.js';
 import {ContactService} from '../services/ContactService.js';
 import {NtfyService} from '../services/NtfyService.js';
 import {importQueue} from '../services/QueueService.js';
+import type {QueueJobContext} from '../queue/types.js';
 
 const BATCH_SIZE = 100; // Process contacts in batches of 100
 
@@ -24,18 +25,15 @@ interface ImportResult {
   errors: {row: number; email: string; error: string}[];
 }
 
-export function createImportWorker() {
-  const worker = new Worker<ContactImportJobData>(
-    importQueue.name,
-    async (job: Job<ContactImportJobData>) => {
-      const {projectId, csvData, filename} = job.data;
+export async function processImportJob(data: ContactImportJobData, context: QueueJobContext = {}): Promise<ImportResult> {
+      const {projectId, csvData, filename} = data;
 
       signale.info(`[IMPORT-PROCESSOR] Processing import for project ${projectId} (${filename})`);
 
       // Fetch project information for notifications
       const project = await prisma.project.findUnique({
         where: {id: projectId},
-        select: {name: true},
+        select: {name: true, disabled: true},
       });
 
       const projectName = project?.name || projectId;
@@ -48,6 +46,11 @@ export function createImportWorker() {
         failureCount: 0,
         errors: [],
       };
+
+      if (project?.disabled) {
+        signale.warn(`[IMPORT-PROCESSOR] Project ${projectId} is disabled, skipping import`);
+        return result;
+      }
 
       try {
         // Decode base64 CSV data
@@ -156,7 +159,7 @@ export function createImportWorker() {
 
           // Update progress
           const progress = Math.round(((i + batch.length) / records.length) * 100);
-          await job.updateProgress(progress);
+          await context.updateProgress?.(progress);
         }
 
         signale.info(
@@ -191,11 +194,13 @@ export function createImportWorker() {
 
         throw error; // Re-throw to mark job as failed
       }
-    },
-    {
-      connection: importQueue.opts.connection,
-      concurrency: 2, // Process max 2 imports concurrently
-    },
+}
+
+export function createImportWorker() {
+  const worker = new Worker<ContactImportJobData>(
+    importQueue.name,
+    job => processImportJob(job.data, {updateProgress: progress => job.updateProgress(progress)}),
+    {connection: importQueue.opts.connection, concurrency: 2},
   );
 
   worker.on('completed', job => {

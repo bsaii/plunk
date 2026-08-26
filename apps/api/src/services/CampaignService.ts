@@ -529,6 +529,11 @@ export class CampaignService {
       throw new HttpException(404, 'Campaign not found');
     }
 
+    if (campaign.project.disabled) {
+      signale.warn(`[CAMPAIGN] Project ${campaign.projectId} is disabled, skipping campaign batch ${batchNumber}`);
+      return;
+    }
+
     if (campaign.status !== CampaignStatus.SENDING) {
       signale.warn(`[CAMPAIGN] Campaign ${campaignId} is not in SENDING status, skipping batch ${batchNumber}`);
       return;

@@ -18,9 +18,11 @@ import type {
   WorkflowStepJobData,
 } from '@plunk/types';
 
-import {REDIS_URL} from '../app/constants.js';
+import {REALTIME_QUEUE_BACKEND, REDIS_URL} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
 import {getBullMqRedisOptions} from '../database/redis.js';
+import {getQueueAdapter} from '../queue/adapter.js';
+import type {QueuedJob} from '../queue/types.js';
 
 /**
  * Queue Configuration
@@ -221,25 +223,19 @@ export class QueueService {
     emailId: string,
     sourceType: EmailSourceType,
     delay?: number,
-  ): Promise<Job<SendEmailJobData>> {
-    return emailQueue.add(
-      'send-email',
-      {emailId},
-      {
-        delay,
-        jobId: `email-${emailId}`,
-        priority: emailPriorityFor(sourceType),
-      },
-    );
+  ): Promise<QueuedJob<SendEmailJobData>> {
+    return getQueueAdapter().enqueue('email', {emailId}, {
+      delayMs: delay,
+      jobId: `email-${emailId}`,
+      emailPriority: emailPriorityFor(sourceType) as 1 | 5 | 10,
+    });
   }
 
   /**
    * Add campaign batch to queue for processing
    */
-  public static async queueCampaignBatch(data: CampaignBatchJobData): Promise<Job<CampaignBatchJobData>> {
-    return campaignQueue.add('process-batch', data, {
-      jobId: `campaign-${data.campaignId}-batch-${data.batchNumber}`,
-    });
+  public static async queueCampaignBatch(data: CampaignBatchJobData): Promise<QueuedJob<CampaignBatchJobData>> {
+    return getQueueAdapter().enqueue('campaign', data, {jobId: `campaign-${data.campaignId}-batch-${data.batchNumber}`});
   }
 
   /**
@@ -249,14 +245,11 @@ export class QueueService {
     executionId: string,
     stepId: string,
     delay?: number,
-  ): Promise<Job<WorkflowStepJobData>> {
-    return workflowQueue.add(
-      'process-step',
+  ): Promise<QueuedJob<WorkflowStepJobData>> {
+    return getQueueAdapter().enqueue(
+      'workflow',
       {executionId, stepId, type: 'process-step'},
-      {
-        delay,
-        jobId: `workflow-${executionId}-${stepId}`,
-      },
+      {delayMs: delay, jobId: `workflow-${executionId}-${stepId}`},
     );
   }
 
@@ -268,14 +261,11 @@ export class QueueService {
     stepId: string,
     stepExecutionId: string,
     timeoutMs: number,
-  ): Promise<Job<WorkflowStepJobData>> {
-    return workflowQueue.add(
-      'timeout',
+  ): Promise<QueuedJob<WorkflowStepJobData>> {
+    return getQueueAdapter().enqueue(
+      'workflow',
       {executionId, stepId, stepExecutionId, type: 'timeout'},
-      {
-        delay: timeoutMs,
-        jobId: `workflow-timeout-${stepExecutionId}`,
-      },
+      {delayMs: timeoutMs, jobId: `workflow-timeout-${stepExecutionId}`},
     );
   }
 
@@ -295,17 +285,13 @@ export class QueueService {
   /**
    * Schedule campaign for future sending
    */
-  public static async scheduleCampaign(campaignId: string, scheduledFor: Date): Promise<Job<ScheduledCampaignJobData>> {
+  public static async scheduleCampaign(campaignId: string, scheduledFor: Date): Promise<QueuedJob<ScheduledCampaignJobData>> {
     const delay = scheduledFor.getTime() - Date.now();
 
-    return scheduledQueue.add(
-      'send-scheduled-campaign',
-      {campaignId},
-      {
-        delay: Math.max(0, delay),
-        jobId: `scheduled-campaign-${campaignId}`,
-      },
-    );
+    return getQueueAdapter().enqueue('scheduled', {campaignId}, {
+      delayMs: Math.max(0, delay),
+      jobId: `scheduled-campaign-${campaignId}`,
+    });
   }
 
   /**
@@ -327,14 +313,10 @@ export class QueueService {
     projectId: string,
     csvData: string,
     filename: string,
-  ): Promise<Job<ContactImportJobData>> {
-    return importQueue.add(
-      'import-contacts',
-      {projectId, csvData, filename},
-      {
-        jobId: `import-${projectId}-${Date.now()}`,
-      },
-    );
+  ): Promise<QueuedJob<ContactImportJobData>> {
+    return getQueueAdapter().enqueue('import', {projectId, csvData, filename}, {
+      jobId: `import-${projectId}-${Date.now()}`,
+    });
   }
 
   /**
@@ -344,6 +326,13 @@ export class QueueService {
    * @returns Job status or null if not found or unauthorized
    */
   public static async getImportJobStatus(jobId: string, projectId: string) {
+    if (REALTIME_QUEUE_BACKEND === 'cloud-tasks') {
+      const {progressStore} = await import('../queue/progress-store.js');
+      const job = await progressStore.get<ContactImportJobData>(jobId);
+      if (!job || job.data.projectId !== projectId) return null;
+      return {id: job.id, state: job.state, progress: job.progress, result: job.result, data: job.data, failedReason: job.failedReason};
+    }
+
     const job = await importQueue.getJob(jobId);
 
     if (!job) {
@@ -377,14 +366,10 @@ export class QueueService {
     customerId: string,
     value: number,
     idempotencyKey?: string,
-  ): Promise<Job<MeterEventJobData>> {
-    return meterQueue.add(
-      'record-meter-event',
-      {customerId, value, idempotencyKey},
-      {
-        jobId: idempotencyKey ? `meter-${idempotencyKey}` : undefined,
-      },
-    );
+  ): Promise<QueuedJob<MeterEventJobData>> {
+    return getQueueAdapter().enqueue('meter', {customerId, value, idempotencyKey}, {
+      jobId: idempotencyKey ? `meter-${idempotencyKey}` : undefined,
+    });
   }
 
   /**
@@ -394,14 +379,10 @@ export class QueueService {
     projectId: string,
     selector: BulkContactActionSelector,
     operation: 'subscribe' | 'unsubscribe' | 'delete',
-  ): Promise<Job<BulkContactActionJobData>> {
-    return bulkContactQueue.add(
-      'bulk-contact-action',
-      {projectId, operation, selector},
-      {
-        jobId: `bulk-${operation}-${projectId}-${Date.now()}`,
-      },
-    );
+  ): Promise<QueuedJob<BulkContactActionJobData>> {
+    return getQueueAdapter().enqueue('bulk-contact-actions', {projectId, operation, selector}, {
+      jobId: `bulk-${operation}-${projectId}-${Date.now()}`,
+    });
   }
 
   /**
@@ -411,6 +392,13 @@ export class QueueService {
    * @returns Job status or null if not found or unauthorized
    */
   public static async getBulkActionJobStatus(jobId: string, projectId: string) {
+    if (REALTIME_QUEUE_BACKEND === 'cloud-tasks') {
+      const {progressStore} = await import('../queue/progress-store.js');
+      const job = await progressStore.get<BulkContactActionJobData>(jobId);
+      if (!job || job.data.projectId !== projectId) return null;
+      return {id: job.id, state: job.state, progress: job.progress, result: job.result, data: job.data, failedReason: job.failedReason};
+    }
+
     const job = await bulkContactQueue.getJob(jobId);
 
     if (!job) {

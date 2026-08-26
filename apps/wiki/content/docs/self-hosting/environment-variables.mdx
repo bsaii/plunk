@@ -116,6 +116,12 @@ Selects how the 5 scheduled maintenance jobs (domain verification, segment count
 | Variable        | Required | Description                                                                                                                                                                                                                                | Default |
 | --------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `QUEUE_BACKEND` | No       | Self-hosted deployments should leave this unset — `bullmq` runs the maintenance jobs as in-process BullMQ repeatable jobs against the worker container from `docker-compose.yml`, exactly as today. `cloud-tasks` is reserved for Plunk's own GCP deployment (Cloud Scheduler + a dedicated Cloud Run Job) and is not a supported self-hosting configuration. | `bullmq` |
+| `REALTIME_QUEUE_BACKEND` | No | Leave unset when self-hosting. `cloud-tasks` is reserved for Plunk's internal GCP worker-service rollout and is activated only after its queues and authenticated worker service are deployed. | `bullmq` |
+| `CLOUD_TASKS_PROJECT_ID` | No | GCP project that owns the internal Cloud Tasks queues. Not used when `REALTIME_QUEUE_BACKEND` is `bullmq`. | — |
+| `CLOUD_TASKS_LOCATION` | No | Region of the internal Cloud Tasks queues. Not used when `REALTIME_QUEUE_BACKEND` is `bullmq`. | — |
+| `CLOUD_TASKS_WORKER_URL` | No | Internal worker-service base URL for Cloud Tasks HTTP delivery. Not used when `REALTIME_QUEUE_BACKEND` is `bullmq`. | — |
+| `CLOUD_TASKS_AUDIENCE` | No | Expected OIDC token audience at the internal worker service. Not used when `REALTIME_QUEUE_BACKEND` is `bullmq`. | — |
+| `CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL` | No | Service account Cloud Tasks uses to authenticate task requests. Not used when `REALTIME_QUEUE_BACKEND` is `bullmq`. | — |
 
 ## SMTP Server
 

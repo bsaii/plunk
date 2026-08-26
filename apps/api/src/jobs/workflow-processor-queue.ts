@@ -4,7 +4,7 @@
  */
 
 import type {WorkflowStepJobData} from '@plunk/types';
-import {type Job, Worker} from 'bullmq';
+import {Worker} from 'bullmq';
 import signale from 'signale';
 
 import {workflowQueue} from '../services/QueueService.js';
@@ -13,21 +13,7 @@ import {WorkflowExecutionService} from '../services/WorkflowExecutionService.js'
 export function createWorkflowWorker() {
   const worker = new Worker<WorkflowStepJobData>(
     workflowQueue.name,
-    async (job: Job<WorkflowStepJobData>) => {
-      const {executionId, stepId, type, stepExecutionId} = job.data;
-
-      if (type === 'timeout') {
-        // Handle timeout for WAIT_FOR_EVENT steps
-        if (!stepExecutionId) {
-          throw new Error('stepExecutionId is required for timeout jobs');
-        }
-
-        await WorkflowExecutionService.processTimeout(executionId, stepId, stepExecutionId);
-      } else {
-        // Handle regular step execution
-        await WorkflowExecutionService.processStepExecution(executionId, stepId);
-      }
-    },
+    job => processWorkflowJob(job.data),
     {
       connection: workflowQueue.opts.connection,
       concurrency: 10, // Process up to 10 workflow steps concurrently
@@ -47,4 +33,14 @@ export function createWorkflowWorker() {
   });
 
   return worker;
+}
+
+export async function processWorkflowJob(data: WorkflowStepJobData): Promise<void> {
+  const {executionId, stepId, type, stepExecutionId} = data;
+  if (type === 'timeout') {
+    if (!stepExecutionId) throw new Error('stepExecutionId is required for timeout jobs');
+    await WorkflowExecutionService.processTimeout(executionId, stepId, stepExecutionId);
+    return;
+  }
+  await WorkflowExecutionService.processStepExecution(executionId, stepId);
 }
