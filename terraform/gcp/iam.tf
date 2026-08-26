@@ -53,6 +53,14 @@ resource "google_service_account" "worker" {
   depends_on = [google_project_service.required]
 }
 
+resource "google_service_account" "maintenance" {
+  project      = var.project_id
+  account_id   = "plunk-maintenance-run"
+  display_name = "Plunk maintenance job (Cloud Run Job runtime identity)"
+
+  depends_on = [google_project_service.required]
+}
+
 # --- Secret Manager access: one binding per secret each identity reads -----
 # for_each over the *values* (Secret Manager secret IDs) of each
 # *_secret_env_vars map, deduplicated with toset() in case two env vars ever
@@ -96,6 +104,15 @@ resource "google_secret_manager_secret_iam_member" "worker" {
   member    = "serviceAccount:${google_service_account.worker.email}"
 }
 
+resource "google_secret_manager_secret_iam_member" "maintenance" {
+  for_each = toset(values(var.maintenance_secret_env_vars))
+
+  project   = var.project_id
+  secret_id = each.value
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.maintenance.email}"
+}
+
 # --- IAM propagation buffer --------------------------------------------
 # Cloud Run resolves every secret_key_ref env var against the runtime
 # service account's roles/secretmanager.secretAccessor grant *at creation
@@ -122,6 +139,11 @@ resource "time_sleep" "migrate_secret_iam_propagation" {
 
 resource "time_sleep" "worker_secret_iam_propagation" {
   depends_on      = [google_secret_manager_secret_iam_member.worker]
+  create_duration = "30s"
+}
+
+resource "time_sleep" "maintenance_secret_iam_propagation" {
+  depends_on      = [google_secret_manager_secret_iam_member.maintenance]
   create_duration = "30s"
 }
 
@@ -174,6 +196,12 @@ resource "google_service_account_iam_member" "cloud_build_acts_as_migrate" {
 
 resource "google_service_account_iam_member" "cloud_build_acts_as_worker" {
   service_account_id = google_service_account.worker.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${local.cloud_build_service_account_email}"
+}
+
+resource "google_service_account_iam_member" "cloud_build_acts_as_maintenance" {
+  service_account_id = google_service_account.maintenance.name
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${local.cloud_build_service_account_email}"
 }

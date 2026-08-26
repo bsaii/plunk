@@ -77,40 +77,18 @@ export class DomainService {
 
     const attributes = await getDomainVerificationAttributes(domain.domain);
 
-    // If domain failed verification, retry
+    // If domain failed verification, restart it once. SES throttling (if any) is
+    // handled by the scheduled domain-verification job's own retry on its normal
+    // cadence, rather than blocking this request with an in-process backoff loop.
     if (attributes.status === 'Failed') {
       signale.warn(`[DOMAIN-SERVICE] Restarting verification for ${domain.domain}`);
 
-      let attempt = 0;
-      const maxAttempts = 5;
-      let success = false;
-      let delay = 5000;
-
-      while (attempt < maxAttempts && !success) {
-        try {
-          await verifyDomain(domain.domain);
-          success = true;
-          signale.success(`[DOMAIN-SERVICE] Restarted verification for ${domain.domain}`);
-        } catch (e: unknown) {
-          const error = e as {Code?: string; name?: string; message?: string};
-          if (error?.Code === 'Throttling' || error?.name === 'Throttling' || error?.message?.includes('Throttling')) {
-            signale.warn(
-              `[DOMAIN-SERVICE] Throttling detected, waiting ${delay / 1000} seconds (attempt ${attempt + 1})`,
-            );
-            await new Promise(r => setTimeout(r, delay));
-            delay *= 2; // Exponential backoff
-            attempt++;
-          } else {
-            signale.error(`[DOMAIN-SERVICE] Error restarting verification: ${error?.message || 'Unknown error'}`);
-            throw e;
-          }
-        }
-      }
-
-      if (!success) {
-        signale.error(
-          `[DOMAIN-SERVICE] Failed to verify ${domain.domain} after ${maxAttempts} attempts due to throttling`,
-        );
+      try {
+        await verifyDomain(domain.domain);
+        signale.success(`[DOMAIN-SERVICE] Restarted verification for ${domain.domain}`);
+      } catch (e: unknown) {
+        const error = e as {message?: string};
+        signale.error(`[DOMAIN-SERVICE] Error restarting verification: ${error?.message || 'Unknown error'}`);
       }
     }
 

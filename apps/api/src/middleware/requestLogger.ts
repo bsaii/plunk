@@ -105,17 +105,18 @@ export const databaseRequestLogger = (req: Request, res: Response, next: NextFun
 
   const startTime = Date.now();
 
-  // Capture the original res.json to log after response
+  // Capture the original res.json and await the database write before it actually
+  // sends the response - completing it after the response is flushed risks silent
+  // loss under Cloud Run's CPU-throttle-after-response billing model.
   const originalJson = res.json.bind(res);
-  res.json = function (body: unknown) {
-    // Call original json method first
-    const result = originalJson(body);
+  res.json = ((body: unknown) => {
+    void logRequestToDatabase(req, res, startTime, body).finally(() => {
+      originalJson(body);
+    });
 
-    // Log to database asynchronously (don't await, don't block response)
-    void logRequestToDatabase(req, res, startTime, body);
-
-    return result;
-  };
+    return res;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  }) as any;
 
   next();
 };

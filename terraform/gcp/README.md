@@ -1,12 +1,19 @@
 # Plunk — GCP Terraform
 
-Manages `plunk-api`, `plunk-web`, the `plunk-migrate` Cloud Run Job, and the `plunk-worker` Cloud
-Run Worker Pool — plus everything the brand-new GCP project this targets needs before any of that
-can exist: the required APIs, the Artifact Registry repo, and every runtime/build service account
-and IAM binding (`services.tf` / `iam.tf`). Nothing in this project has been deployed yet — every
-`google_cloud_run_v2_*`/`google_artifact_registry_repository` resource here is a first-time
-`create`, not an update to something already running, so no `terraform import` step is needed
-before the first `apply`.
+Manages `plunk-api`, `plunk-web`, the `plunk-migrate` and `plunk-maintenance` Cloud Run Jobs (the
+latter driven by 5 Cloud Scheduler entries — see "Maintenance jobs" below), and the `plunk-worker`
+Cloud Run Worker Pool — plus everything a GCP project needs before any of that can exist: the
+required APIs, the Artifact Registry repo, and every runtime/build service account and IAM binding
+(`services.tf` / `iam.tf`).
+
+**This project is already deployed** — the "Usage: bootstrapping a brand-new GCP project" section
+below documents the original bootstrap (useful for standing up a second environment, e.g.
+staging), but the production project it targets is a live deployment, currently pre-launch / low
+traffic rather than a from-scratch target. Treat every change here as a normal `plan`-then-`apply`
+against live state, not a first-time `create`: review the `terraform plan` diff carefully before
+applying, and prefer capturing the live Cloud Run config (`gcloud run services describe`, `gcloud
+run jobs describe`, `gcloud run worker-pools describe`) before a change that touches
+scaling/CPU-allocation fields, so the diff is checked against reality rather than assumed.
 
 ## Division of labor with `cloudbuild.yaml`
 
@@ -43,16 +50,52 @@ The `roles/run.invoker` → `allUsers` IAM binding on each service stays in plac
 open to the whole internet, Cloud Run still requires an explicit grant to skip Google's own IAM
 auth on incoming requests; Plunk does its own app-level auth on top of that.
 
+## Maintenance jobs
+
+The 5 scheduled maintenance sweeps (domain verification, segment counts, and 3 cleanup jobs — API
+request logs, expired idempotency keys, old email bodies) run as a single `plunk-maintenance`
+Cloud Run Job, one image serving all 5 schedules (`maintenance.tf`). Each schedule is its own
+`google_cloud_scheduler_job`, authenticated as the dedicated `plunk-scheduler-run` service account,
+calling the Cloud Run Admin API's `projects.locations.jobs.run` method with a per-invocation
+`--task=<name>` container args override — the job's own static template deliberately carries no
+default task, so a direct/manual `gcloud run jobs execute plunk-maintenance` (no override) fails
+loud instead of silently running the wrong sweep. All 5 schedules run in UTC:
+
+| Task | Schedule (UTC) |
+| --- | --- |
+| `domain-verification` | `*/5 * * * *` (every 5 minutes) |
+| `segment-count` | `*/5 * * * *` (every 5 minutes) |
+| `api-request-cleanup` | `0 3 * * *` (daily at 03:00) |
+| `idempotency-key-cleanup` | `0 * * * *` (hourly) |
+| `email-body-cleanup` | `0 4 * * *` (daily at 04:00) |
+
+This is the GCP-deployment equivalent of the same 5 sweeps that self-hosted deployments still run
+as BullMQ in-process repeatable jobs (`app.ts`, registered on boot) — the `QUEUE_BACKEND` env var
+(`api_env_vars`/`maintenance_env_vars`, defaults to `bullmq`) is what tells `app.ts` to skip
+registering them there once this deployment sets it to `cloud-tasks`, so the two scheduling
+mechanisms never double-run the same sweep. Only the 5 maintenance tasks moved off BullMQ this way
+— the 7 real-time queues (email, campaign, workflow, import, etc.) still run on `plunk-worker`'s
+BullMQ workers; see the repo's tracked GitHub issues for the (larger, deferred) Cloud Tasks
+migration that eventually replaces those too.
+
+Force-run one task on demand (e.g. to smoke-test after a deploy) rather than waiting for its
+schedule:
+
+```bash
+gcloud scheduler jobs run plunk-maintenance-domain-verification --location=us-central1
+```
+
 ## Prerequisites this Terraform provisions (`services.tf`, `iam.tf`)
 
 On a brand-new GCP project there is nothing to click through in the console first:
 
 - **`services.tf`** enables every required API (`run`, `artifactregistry`, `secretmanager`, `iam`,
-  `cloudbuild`, `cloudresourcemanager`) with `disable_on_destroy = false`, and creates the `plunk`
-  Artifact Registry Docker repo that `cloudbuild.yaml` pushes `api`/`web`/`worker` images into.
+  `cloudbuild`, `cloudresourcemanager`, `cloudscheduler`) with `disable_on_destroy = false`, and
+  creates the `plunk` Artifact Registry Docker repo that `cloudbuild.yaml` pushes
+  `api`/`web`/`worker`/`maintenance` images into.
 - **`iam.tf`** creates a dedicated runtime service account per Cloud Run resource
-  (`plunk-api-run`, `plunk-web-run`, `plunk-migrate-run`, `plunk-worker-run`) instead of relying on
-  the shared per-project default compute service account, and grants each one
+  (`plunk-api-run`, `plunk-web-run`, `plunk-migrate-run`, `plunk-worker-run`, `plunk-maintenance-run`)
+  instead of relying on the shared per-project default compute service account, and grants each one
   `roles/secretmanager.secretAccessor` scoped to exactly the secrets its own `*_secret_env_vars`
   map references — required for Cloud Run to resolve a `secret_key_ref` env var at container
   start (see [Google's secret access requirement](https://cloud.google.com/run/docs/configuring/secrets#access-secret)).
@@ -62,24 +105,26 @@ On a brand-new GCP project there is nothing to click through in the console firs
   see `docs/deploy-cloud-build.md`) `roles/run.admin`, `roles/logging.logWriter`, repo-scoped
   `roles/artifactregistry.writer`, and `roles/iam.serviceAccountUser` on each runtime service
   account individually. The Cloud Build service account itself is **not** created here — it must
-  already exist; this file only grants it IAM roles. `iam.tf` also has three `time_sleep` resources
+  already exist; this file only grants it IAM roles. `iam.tf` also has `time_sleep` resources
   (`hashicorp/time` provider) that buffer 30s between granting `secretAccessor` and creating the
   Cloud Run resource that needs it — see that file's comment for the IAM-propagation race this
-  works around.
+  works around. A sixth identity, `plunk-scheduler-run` (`maintenance.tf`), is separate from the
+  five runtime identities above — it's what Cloud Scheduler itself uses to invoke
+  `plunk-maintenance`, granted `roles/run.invoker` on that one job and nothing else.
 
 ## Labels
 
 Every Cloud Run service/job/worker-pool resource gets two labels (`api.tf`, `web.tf`,
-`migrate.tf`, `worker.tf`); the Artifact Registry repo (`services.tf`) gets the `environment`
-label alone. IAM resources (service accounts, IAM bindings) and the Domain Mapping resources
-(`dns.tf`) do **not** carry these labels — Cloud IAM resources don't support labels at all, and
-the Domain Mappings weren't wired up with `metadata.labels` since nothing queries/bills on them
-individually the way `component` does for the Cloud Run resources themselves:
+`migrate.tf`, `worker.tf`, `maintenance.tf`); the Artifact Registry repo (`services.tf`) gets the
+`environment` label alone. IAM resources (service accounts, IAM bindings) and the Domain Mapping
+resources (`dns.tf`) do **not** carry these labels — Cloud IAM resources don't support labels at
+all, and the Domain Mappings weren't wired up with `metadata.labels` since nothing queries/bills on
+them individually the way `component` does for the Cloud Run resources themselves:
 
 | Label | Value | Purpose |
 | --- | --- | --- |
 | `environment` | `var.environment` | Separates cost/queries per environment if this project ever hosts more than one (production, staging, ...). |
-| `component` | `api` / `web` / `migrate` / `worker` | Breaks down Cloud Billing cost reports and `gcloud ... --filter="labels.component=api"` queries per piece of infrastructure instead of one lump sum. |
+| `component` | `api` / `web` / `migrate` / `worker` / `maintenance` | Breaks down Cloud Billing cost reports and `gcloud ... --filter="labels.component=api"` queries per piece of infrastructure instead of one lump sum. |
 
 ## Usage: bootstrapping a brand-new GCP project
 
@@ -237,16 +282,30 @@ terraform apply production.tfplan
 
 #### What to expect from `terraform plan`
 
-Every resource in this directory is a first-time `create` (see the header of this file) — a
-correct plan against a brand-new project shows **N to add, 0 to change, 0 to destroy**, and never
-any `~` (in-place update) or `-` (destroy) line. Roughly, in the order Terraform will list them: 6
-`google_project_service` API enablements, 1 Artifact Registry repo, 4 runtime service accounts, one
+This describes a first-time bootstrap of a brand-new project/environment (see the header of this
+file for why production itself no longer matches that description). Applying the Phase 0+1
+maintenance-job + scale-to-zero changes against the already-deployed production project instead
+shows a much smaller, purely additive diff: the `plunk-maintenance` Cloud Run Job, its 5 Cloud
+Scheduler entries, the `plunk-maintenance-run` and `plunk-scheduler-run` service accounts and their
+IAM grants, plus `~` (in-place update) lines for `plunk-api`'s `min_instance_count`/`cpu_idle` and
+`plunk-web`'s `cpu_idle` — nothing else should show as changed or destroyed. Capture the live
+`min_instance_count`/CPU-allocation state with `gcloud run services describe` before applying (see
+the header of this file) so that diff is checked against reality, not assumed.
+
+On a first-time bootstrap of a brand-new project, every resource in this directory is a first-time
+`create` — a correct plan shows **N to add, 0 to change, 0 to destroy**, and never
+any `~` (in-place update) or `-` (destroy) line. Roughly, in the order Terraform will list them: 7
+`google_project_service` API enablements (incl. `cloudscheduler`), 1 Artifact Registry repo, 6
+runtime service accounts (incl. `plunk-maintenance-run` and `plunk-scheduler-run`), one
 `google_secret_manager_secret_iam_member` per unique secret ID your tfvars' `*_secret_env_vars`
-maps reference (10 unique IDs in the committed template → 18 grants split across api/migrate/
-worker), 3 `time_sleep` IAM-propagation buffers, 7 Cloud Build IAM grants, 2 Cloud Run services plus
-2 `run.invoker` bindings, 1 Cloud Run Job, 1 Cloud Run Worker Pool, and 2 Cloud Run Domain Mappings
-(`dns.tf`). That's around 47 resources total with the template's secret maps left as-is — the exact
-count scales with how many secrets you end up referencing. If `plan` errors instead, it's almost
+maps reference (10 unique secret IDs in the committed template → 22 grants split across
+api/migrate/worker/maintenance), 4 `time_sleep` IAM-propagation buffers, 8 Cloud Build IAM grants, 2
+Cloud Run services plus 2 `run.invoker` bindings, 2 Cloud Run Jobs (`plunk-migrate`,
+`plunk-maintenance`) plus 1 `google_cloud_run_v2_job_iam_member` (Cloud Scheduler's invoker grant on
+`plunk-maintenance`), 5 `google_cloud_scheduler_job` entries, 1 Cloud Run Worker Pool, and 2 Cloud
+Run Domain Mappings (`dns.tf`). That's around 64 resources total with the template's secret maps
+left as-is — the exact count scales with how many secrets you end up referencing. If `plan` errors
+instead, it's almost
 always one of: a secret from
 step 3 that doesn't exist yet, the Cloud Build service account from step 2 missing, or
 `-backend-config` pointing at a state bucket that doesn't exist (step 1) — `plan` itself never
@@ -262,14 +321,16 @@ resources can take noticeably longer (sometimes several minutes) since Google ve
 ownership and starts certificate issuance as part of creating them — `apply` doesn't return until
 that create call completes, even though the certificate itself is still `PROVISIONING` at that
 point (see "After apply" below). On success, Terraform prints every `outputs.tf` value: both
-services' direct, publicly-reachable `*.run.app` URLs, the migrate job and worker pool names, the
-Artifact Registry path, all five service account emails, and `api_domain_mapping_records` /
-`web_domain_mapping_records` — the DNS records to hand Cloudflare. The two Cloud Run services and
-the worker pool come up running the placeholder `us-docker.pkg.dev/cloudrun/container/hello` image
-(`api_image`/`web_image`/`worker_image`'s defaults) — they don't serve real Plunk traffic until you
-run `cloudbuild.yaml` at least once (see `docs/deploy-cloud-build.md`), after which this
-Terraform's `lifecycle.ignore_changes` on the image field leaves the deployed image alone on every
-subsequent `apply`.
+services' direct, publicly-reachable `*.run.app` URLs, the migrate job, maintenance job, and
+worker pool names, the 5 maintenance Cloud Scheduler job names, the Artifact Registry path, all
+seven service account emails, and `api_domain_mapping_records` / `web_domain_mapping_records` —
+the DNS records to hand Cloudflare. The two Cloud Run services, the maintenance job, and the worker
+pool come up running the placeholder `us-docker.pkg.dev/cloudrun/container/hello` image
+(`api_image`/`web_image`/`worker_image`/`maintenance_image`'s defaults) — they don't serve real
+Plunk traffic (or, for `plunk-maintenance`, run a real task — its default image has no
+`maintenance-runner.js` to dispatch through) until you run `cloudbuild.yaml` at least once (see
+`docs/deploy-cloud-build.md`), after which this Terraform's `lifecycle.ignore_changes` on the image
+field leaves the deployed image alone on every subsequent `apply`.
 
 If `apply` fails on either domain mapping with a verification/ownership error, go back to step 5
 above and confirm that exact domain (not just its parent) shows up in
@@ -319,19 +380,22 @@ with a normal route to `registry.terraform.io`, or `terraform providers lock`) o
 
 | # | Resource | Type | Notes |
 | --- | --- | --- | --- |
-| 1 | `plunk-api` | Cloud Run v2 service | `min_instance_count=1`, `1 vCPU`/`512Mi` by default — at least one instance billed continuously (CPU+memory), plus per-request beyond that |
-| 2 | `plunk-web` | Cloud Run v2 service | `min_instance_count=0`, `1 vCPU`/`512Mi` by default — billed only while serving requests (scale-to-zero) |
+| 1 | `plunk-api` | Cloud Run v2 service | `min_instance_count=0` (`var.api_min_instance_count`), `cpu_idle=true` (request-based billing), `1 vCPU`/`512Mi` by default — billed only while handling a request, same tier as `plunk-web`. Was `min_instance_count=1` with CPU always allocated (an always-on instance billed continuously) until Phase 0's workflow-execution fix made scale-to-zero safe — see `api.tf`'s header comment. Cold starts cost a few seconds of Node/Prisma boot latency after an idle period; flip `api_min_instance_count` back to 1 in `terraform.tfvars` if that proves noticeable once real traffic ramps up |
+| 2 | `plunk-web` | Cloud Run v2 service | `min_instance_count=0`, `cpu_idle=true` (now explicit rather than relying on the provider default), `1 vCPU`/`512Mi` by default — billed only while serving requests (scale-to-zero) |
 | 3 | `plunk-migrate` | Cloud Run v2 Job | Billed only on manual execution; effectively $0 at rest |
-| 4 | `plunk-worker` | Cloud Run v2 Worker Pool | Fixed `manual_instance_count=1` (Worker Pools don't autoscale on load the way a Cloud Run service does), `1 vCPU`/`512Mi` by default — always-on, no request-based tier (no HTTP entrypoint); ≈$62–68/month baseline for the one always-on instance at current Tier-1 rates, verify against the calculator; raise `worker_instance_count` by hand (and `worker_memory` if needed) as queue throughput grows |
-| 5 | `plunk` Artifact Registry repo | Docker repo | Storage (per GB of stored image layers) + minor egress; no direct charge for the repo itself |
-| 6 | `plunk-api`/`plunk-web` Domain Mappings | `google_cloud_run_domain_mapping` (x2) | No direct GCP charge — the managed certificate is free, same as the old load-balancer approach; Cloudflare's own plan/bandwidth costs apply separately and aren't a GCP Pricing Calculator line item |
-| 7 | Runtime service accounts (x4) + Cloud Build IAM bindings | `google_service_account`, `google_*_iam_member` | No charge — IAM has no usage-based cost |
-| 8 | IAM invoker bindings | `google_cloud_run_v2_service_iam_member` (x2) | No charge |
-| 9 | Secret Manager secret access | References only — secrets pre-exist | Per-access-op charges only, negligible at this scale |
+| 4 | `plunk-maintenance` | Cloud Run v2 Job | Billed only while a Cloud Scheduler-triggered execution runs (5 short-lived runs/day at most, one per schedule); effectively $0 at rest — see "Maintenance jobs" above |
+| 5 | `plunk-maintenance-*` Cloud Scheduler jobs (x5) | `google_cloud_scheduler_job` | Cloud Scheduler has a small free-tier job allowance; well within it at 5 jobs |
+| 6 | `plunk-worker` | Cloud Run v2 Worker Pool | Fixed `manual_instance_count=1` (Worker Pools don't autoscale on load the way a Cloud Run service does), `1 vCPU`/`512Mi` by default — always-on, no request-based tier (no HTTP entrypoint); ≈$62–68/month baseline for the one always-on instance at current Tier-1 rates, verify against the calculator; raise `worker_instance_count` by hand (and `worker_memory` if needed) as queue throughput grows. **Not eliminated by this Phase 0+1 pass** — still required until a later Cloud Tasks migration (tracked as a GitHub issue) replaces the 7 real-time BullMQ queues it runs |
+| 7 | `plunk` Artifact Registry repo | Docker repo | Storage (per GB of stored image layers) + minor egress; no direct charge for the repo itself |
+| 8 | `plunk-api`/`plunk-web` Domain Mappings | `google_cloud_run_domain_mapping` (x2) | No direct GCP charge — the managed certificate is free, same as the old load-balancer approach; Cloudflare's own plan/bandwidth costs apply separately and aren't a GCP Pricing Calculator line item |
+| 9 | Runtime service accounts (x6, incl. `plunk-scheduler-run`) + Cloud Build IAM bindings | `google_service_account`, `google_*_iam_member` | No charge — IAM has no usage-based cost |
+| 10 | IAM invoker bindings | `google_cloud_run_v2_service_iam_member` (x2), `google_cloud_run_v2_job_iam_member` (x1) | No charge |
+| 11 | Secret Manager secret access | References only — secrets pre-exist | Per-access-op charges only, negligible at this scale |
 
-The two biggest cost levers to check against the pricing calculator before applying: `plunk-api`
-(`min_instance_count=1`) and `plunk-worker` (fixed `manual_instance_count=1`) both running an
-always-on instance continuously. There's no load-balancer forwarding-rule or reserved-IP charge in
+The two biggest cost levers to check against the pricing calculator: `plunk-worker`'s fixed
+`manual_instance_count=1` running an always-on instance continuously (the one Phase 0+1 does
+**not** eliminate — see row 6), and, if `api_min_instance_count` is ever raised back to 1,
+`plunk-api` running the same way. There's no load-balancer forwarding-rule or reserved-IP charge in
 this design — traffic goes DNS → Cloudflare → Cloud Run directly.
 
 ## Out of scope
@@ -348,5 +412,7 @@ this design — traffic goes DNS → Cloudflare → Cloud Run directly.
   create the account itself; that's a one-time `gcloud iam service-accounts create` step (see
   "Usage" step 2 above and `docs/deploy-cloud-build.md`), deliberately kept outside Terraform's
   ownership.
-- Importing pre-existing resources — not applicable. This targets a brand-new GCP project with
-  nothing deployed yet, so there is nothing to import.
+- Importing pre-existing resources created outside Terraform — not applicable to production, since
+  every resource this directory manages there was created by an earlier `terraform apply` (see the
+  header of this file), not clicked through the console first. Only relevant if you ever have a
+  resource that exists in GCP but not yet in this Terraform's state.

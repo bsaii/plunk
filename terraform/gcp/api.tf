@@ -1,5 +1,17 @@
-# plunk-api — min_instance_count = 1 so there is always a warm instance (no
-# cold starts). Public internet ingress: Cloudflare proxies api_domain
+# plunk-api — min_instance_count defaults to 0 (scale-to-zero) and cpu_idle
+# to true (request-based billing, CPU only allocated while handling a
+# request). Both were previously an always-warm instance with CPU always
+# allocated, kept that way as a correctness crutch: workflow execution used
+# to run synchronously (and, in one path, fire-and-forget) inside HTTP
+# request handlers, which is unsafe once CPU can be throttled after the
+# response is sent. That's fixed now (see WorkflowExecutionService.ts,
+# EventService.ts, WorkflowService.ts, and the requestLogger.ts/idempotency.ts
+# middleware, which now complete their DB writes before the response is
+# flushed rather than after) — so both flags are safe to flip. Cold starts
+# cost a few seconds of Node/Prisma boot latency after an idle period; raise
+# api_min_instance_count back to 1 (terraform.tfvars) if that proves
+# noticeable once this deployment carries real traffic.
+# Public internet ingress: Cloudflare proxies api_domain
 # straight to this service (see dns.tf's domain mapping) rather than routing
 # through a GCP load balancer, so this can't be restricted to
 # INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER — there is no GCP-internal path from
@@ -25,7 +37,7 @@ resource "google_cloud_run_v2_service" "api" {
 
   template {
     scaling {
-      min_instance_count = 1
+      min_instance_count = var.api_min_instance_count
       max_instance_count = var.api_max_instance_count
     }
 
@@ -42,6 +54,10 @@ resource "google_cloud_run_v2_service" "api" {
           cpu    = var.api_cpu
           memory = var.api_memory
         }
+        # Explicit rather than relying on the provider default (see the
+        # header comment above) — request-based billing, CPU only allocated
+        # while handling a request.
+        cpu_idle = true
       }
 
       ports {

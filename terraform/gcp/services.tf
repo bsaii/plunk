@@ -16,6 +16,7 @@ locals {
     "iam.googleapis.com",                  # Service account + IAM management (iam.tf)
     "cloudbuild.googleapis.com",           # Cloud Build (../../cloudbuild.yaml)
     "cloudresourcemanager.googleapis.com", # Project-level IAM bindings (iam.tf)
+    "cloudscheduler.googleapis.com",       # Cloud Scheduler (maintenance.tf)
   ]
 }
 

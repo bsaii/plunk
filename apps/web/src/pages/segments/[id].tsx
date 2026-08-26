@@ -106,6 +106,44 @@ export default function SegmentDetailPage() {
     }
   };
 
+  const pollComputeStatus = async (jobId: string): Promise<void> => {
+    try {
+      const response = await network.fetch<{
+        id: string;
+        state: string;
+        result: {added: number; removed: number; total: number} | null;
+        failedReason?: string;
+      }>('GET', `/segments/${id}/compute/${jobId}`);
+
+      if (response.state === 'completed') {
+        setIsComputing(false);
+        if (response.result) {
+          toast.success(
+            `Membership updated: ${response.result.added} added, ${response.result.removed} removed, ${response.result.total} total`,
+          );
+        } else {
+          toast.success('Membership updated');
+        }
+        void mutate();
+        return;
+      }
+
+      if (response.state === 'failed') {
+        setIsComputing(false);
+        toast.error(response.failedReason || 'Failed to compute membership');
+        return;
+      }
+
+      // Still queued/active - keep polling
+      setTimeout(() => {
+        void pollComputeStatus(jobId);
+      }, 1000);
+    } catch (error) {
+      setIsComputing(false);
+      toast.error(error instanceof Error ? error.message : 'Failed to check compute status');
+    }
+  };
+
   const handleComputeMembership = async () => {
     if (!trackMembership) {
       toast.error('Membership tracking must be enabled to compute membership');
@@ -114,16 +152,11 @@ export default function SegmentDetailPage() {
 
     setIsComputing(true);
     try {
-      const result = await network.fetch<{added: number; removed: number; total: number}>(
-        'POST',
-        `/segments/${id}/compute`,
-      );
-      toast.success(`Membership updated: ${result.added} added, ${result.removed} removed, ${result.total} total`);
-      void mutate();
+      const {jobId} = await network.fetch<{status: string; jobId: string}>('POST', `/segments/${id}/compute`);
+      void pollComputeStatus(jobId);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to compute membership');
-    } finally {
       setIsComputing(false);
+      toast.error(error instanceof Error ? error.message : 'Failed to compute membership');
     }
   };
 

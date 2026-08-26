@@ -18,9 +18,10 @@ const RETENTION_DAYS = 30; // Keep logs for 30 days
 const BATCH_SIZE = 10000; // Delete in batches for performance
 
 /**
- * Process API request cleanup job
+ * Delete API request logs older than the retention window. Shared by the BullMQ
+ * worker callback and the maintenance Cloud Run Job CLI entrypoint.
  */
-async function processCleanup(job: Job<ApiRequestCleanupJobData>): Promise<{deleted: number}> {
+export async function runApiRequestCleanupJob(): Promise<{deleted: number}> {
   signale.info('[API-REQUEST-CLEANUP] Starting cleanup of old API request logs...');
 
   const cutoffDate = new Date();
@@ -57,14 +58,23 @@ async function processCleanup(job: Job<ApiRequestCleanupJobData>): Promise<{dele
       `[API-REQUEST-CLEANUP] Cleanup complete. Deleted ${totalDeleted} records older than ${RETENTION_DAYS} days (before ${cutoffDate.toISOString()})`,
     );
 
-    // Update job progress
-    await job.updateProgress(100);
-
     return {deleted: totalDeleted};
   } catch (error) {
     signale.error('[API-REQUEST-CLEANUP] Error during cleanup:', error);
     throw error;
   }
+}
+
+/**
+ * Process API request cleanup job
+ */
+async function processCleanup(job: Job<ApiRequestCleanupJobData>): Promise<{deleted: number}> {
+  const result = await runApiRequestCleanupJob();
+
+  // Update job progress (no-op outside of a BullMQ worker context)
+  await job.updateProgress(100);
+
+  return result;
 }
 
 /**
@@ -95,4 +105,18 @@ export function createApiRequestCleanupWorker(): Worker<ApiRequestCleanupJobData
   });
 
   return worker;
+}
+
+// If running this file directly (for testing or manual execution)
+if (import.meta.url === `file://${process.argv[1]}`) {
+  signale.info('[API-REQUEST-CLEANUP] Running API request cleanup job manually...');
+  runApiRequestCleanupJob()
+    .then(() => {
+      signale.success('[API-REQUEST-CLEANUP] Completed successfully');
+      process.exit(0);
+    })
+    .catch(error => {
+      signale.error('[API-REQUEST-CLEANUP] Fatal error:', error);
+      process.exit(1);
+    });
 }

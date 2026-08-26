@@ -18,6 +18,16 @@ output "worker_pool_name" {
   value       = google_cloud_run_v2_worker_pool.worker.name
 }
 
+output "maintenance_job_name" {
+  description = "Name of the plunk-maintenance Cloud Run Job. Force-run a single task for smoke testing: gcloud scheduler jobs run <scheduler_job_name> --location=<region> — see maintenance_scheduler_job_names."
+  value       = google_cloud_run_v2_job.maintenance.name
+}
+
+output "maintenance_scheduler_job_names" {
+  description = "Names of the 5 Cloud Scheduler jobs that trigger plunk-maintenance, keyed by task name. Force-run one: gcloud scheduler jobs run <name> --location=<region>."
+  value       = {for k, v in google_cloud_scheduler_job.maintenance : k => v.name}
+}
+
 output "artifact_registry_repository" {
   description = "Fully-qualified Artifact Registry repo path (region-docker.pkg.dev/project/repo) — matches cloudbuild.yaml's image tags ($${_REGION}-docker.pkg.dev/$PROJECT_ID/$${_AR_REPO})."
   value       = "${google_artifact_registry_repository.plunk.location}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.plunk.repository_id}"
@@ -46,6 +56,16 @@ output "migrate_service_account_email" {
 output "worker_service_account_email" {
   description = "Runtime identity plunk-worker's Cloud Run Worker Pool instances execute as."
   value       = google_service_account.worker.email
+}
+
+output "maintenance_service_account_email" {
+  description = "Runtime identity plunk-maintenance's Cloud Run Job executions execute as."
+  value       = google_service_account.maintenance.email
+}
+
+output "scheduler_service_account_email" {
+  description = "Identity Cloud Scheduler uses to invoke plunk-maintenance (granted roles/run.invoker on that job only, see maintenance.tf)."
+  value       = google_service_account.scheduler.email
 }
 
 output "api_domain_mapping_records" {

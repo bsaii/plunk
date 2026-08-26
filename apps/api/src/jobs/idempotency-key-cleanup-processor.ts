@@ -16,9 +16,10 @@ import {prisma} from '../database/prisma.js';
 const BATCH_SIZE = 10000; // Delete in batches to avoid long-held locks
 
 /**
- * Process idempotency key cleanup job
+ * Delete idempotency key claims past their expiresAt. Shared by the BullMQ worker
+ * callback and the maintenance Cloud Run Job CLI entrypoint.
  */
-async function processCleanup(job: Job<IdempotencyKeyCleanupJobData>): Promise<{deleted: number}> {
+export async function runIdempotencyKeyCleanupJob(): Promise<{deleted: number}> {
   signale.info('[IDEMPOTENCY-CLEANUP] Starting cleanup of expired idempotency keys...');
 
   let totalDeleted = 0;
@@ -48,13 +49,23 @@ async function processCleanup(job: Job<IdempotencyKeyCleanupJobData>): Promise<{
 
     signale.success(`[IDEMPOTENCY-CLEANUP] Cleanup complete. Deleted ${totalDeleted} expired keys`);
 
-    await job.updateProgress(100);
-
     return {deleted: totalDeleted};
   } catch (error) {
     signale.error('[IDEMPOTENCY-CLEANUP] Error during cleanup:', error);
     throw error;
   }
+}
+
+/**
+ * Process idempotency key cleanup job
+ */
+async function processCleanup(job: Job<IdempotencyKeyCleanupJobData>): Promise<{deleted: number}> {
+  const result = await runIdempotencyKeyCleanupJob();
+
+  // Update job progress (no-op outside of a BullMQ worker context)
+  await job.updateProgress(100);
+
+  return result;
 }
 
 /**
@@ -95,4 +106,18 @@ function parseRedisUrl(url: string): {host: string; port: number; password?: str
     password: urlObj.password || undefined,
     db: parseInt(urlObj.pathname.slice(1) || '0', 10),
   };
+}
+
+// If running this file directly (for testing or manual execution)
+if (import.meta.url === `file://${process.argv[1]}`) {
+  signale.info('[IDEMPOTENCY-CLEANUP] Running idempotency key cleanup job manually...');
+  runIdempotencyKeyCleanupJob()
+    .then(() => {
+      signale.success('[IDEMPOTENCY-CLEANUP] Completed successfully');
+      process.exit(0);
+    })
+    .catch(error => {
+      signale.error('[IDEMPOTENCY-CLEANUP] Fatal error:', error);
+      process.exit(1);
+    });
 }

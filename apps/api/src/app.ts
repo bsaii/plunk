@@ -16,6 +16,7 @@ import {
   NODE_ENV,
   PLUNK_ENABLED,
   PORT,
+  QUEUE_BACKEND,
   S3_ENABLED,
   SMTP_ENABLED,
   STRIPE_ENABLED,
@@ -465,78 +466,84 @@ void prisma.$connect().then(async () => {
     }
   }
 
-  // Set up repeatable job for domain verification (BullMQ)
-  // Run every 5 minutes to check domain verification status with AWS SES
-  await domainVerificationQueue.add(
-    'check-domain-verification',
-    {},
-    {
-      repeat: {
-        pattern: '*/5 * * * *', // Every 5 minutes
+  // The 5 maintenance sweeps below are BullMQ's in-process repeatable jobs — the
+  // self-hosted (all-BullMQ) path. Under QUEUE_BACKEND=cloud-tasks (GCP deployment),
+  // these run instead as Cloud Scheduler + a Cloud Run Job (terraform/gcp/maintenance.tf),
+  // so registering them here too would double-run every sweep.
+  if (QUEUE_BACKEND === 'bullmq') {
+    // Set up repeatable job for domain verification (BullMQ)
+    // Run every 5 minutes to check domain verification status with AWS SES
+    await domainVerificationQueue.add(
+      'check-domain-verification',
+      {},
+      {
+        repeat: {
+          pattern: '*/5 * * * *', // Every 5 minutes
+        },
+        jobId: 'domain-verification-repeatable', // Fixed ID to prevent duplicates
       },
-      jobId: 'domain-verification-repeatable', // Fixed ID to prevent duplicates
-    },
-  );
+    );
 
-  signale.info('[BACKGROUND-JOB] Domain verification scheduled (BullMQ repeatable job, runs every 5 minutes)');
+    signale.info('[BACKGROUND-JOB] Domain verification scheduled (BullMQ repeatable job, runs every 5 minutes)');
 
-  // Set up repeatable job for segment count updates (BullMQ)
-  // Run every 5 minutes to compute membership changes and trigger events
-  await segmentCountQueue.add(
-    'update-segment-counts',
-    {},
-    {
-      repeat: {
-        pattern: '*/5 * * * *', // Every 5 minutes
+    // Set up repeatable job for segment count updates (BullMQ)
+    // Run every 5 minutes to compute membership changes and trigger events
+    await segmentCountQueue.add(
+      'update-segment-counts',
+      {},
+      {
+        repeat: {
+          pattern: '*/5 * * * *', // Every 5 minutes
+        },
+        jobId: 'segment-count-repeatable', // Fixed ID to prevent duplicates
       },
-      jobId: 'segment-count-repeatable', // Fixed ID to prevent duplicates
-    },
-  );
+    );
 
-  signale.info('[BACKGROUND-JOB] Segment count updater scheduled (BullMQ repeatable job, runs every 5 minutes)');
+    signale.info('[BACKGROUND-JOB] Segment count updater scheduled (BullMQ repeatable job, runs every 5 minutes)');
 
-  // Set up repeatable job for API request log cleanup (BullMQ)
-  // Run daily at 3 AM to clean up old request logs
-  await apiRequestCleanupQueue.add(
-    'cleanup-old-requests',
-    {},
-    {
-      repeat: {
-        pattern: '0 3 * * *', // Daily at 3 AM
+    // Set up repeatable job for API request log cleanup (BullMQ)
+    // Run daily at 3 AM to clean up old request logs
+    await apiRequestCleanupQueue.add(
+      'cleanup-old-requests',
+      {},
+      {
+        repeat: {
+          pattern: '0 3 * * *', // Daily at 3 AM
+        },
+        jobId: 'api-request-cleanup-repeatable', // Fixed ID to prevent duplicates
       },
-      jobId: 'api-request-cleanup-repeatable', // Fixed ID to prevent duplicates
-    },
-  );
+    );
 
-  signale.info('[BACKGROUND-JOB] API request cleanup scheduled (BullMQ repeatable job, runs daily at 3 AM)');
+    signale.info('[BACKGROUND-JOB] API request cleanup scheduled (BullMQ repeatable job, runs daily at 3 AM)');
 
-  // Set up repeatable job for expired idempotency key cleanup (BullMQ)
-  // Runs hourly: expiry is what makes a key reusable, so the sweep should track the TTL
-  await idempotencyKeyCleanupQueue.add(
-    'cleanup-expired-keys',
-    {},
-    {
-      repeat: {
-        pattern: '0 * * * *', // Hourly, on the hour
+    // Set up repeatable job for expired idempotency key cleanup (BullMQ)
+    // Runs hourly: expiry is what makes a key reusable, so the sweep should track the TTL
+    await idempotencyKeyCleanupQueue.add(
+      'cleanup-expired-keys',
+      {},
+      {
+        repeat: {
+          pattern: '0 * * * *', // Hourly, on the hour
+        },
+        jobId: 'idempotency-key-cleanup-repeatable', // Fixed ID to prevent duplicates
       },
-      jobId: 'idempotency-key-cleanup-repeatable', // Fixed ID to prevent duplicates
-    },
-  );
+    );
 
-  signale.info('[BACKGROUND-JOB] Idempotency key cleanup scheduled (BullMQ repeatable job, runs hourly)');
+    signale.info('[BACKGROUND-JOB] Idempotency key cleanup scheduled (BullMQ repeatable job, runs hourly)');
 
-  // Set up repeatable job for email body cleanup (BullMQ)
-  // Run daily at 4 AM, offset from the API request cleanup so the two don't overlap
-  await emailBodyCleanupQueue.add(
-    'cleanup-old-email-bodies',
-    {},
-    {
-      repeat: {
-        pattern: '0 4 * * *', // Daily at 4 AM
+    // Set up repeatable job for email body cleanup (BullMQ)
+    // Run daily at 4 AM, offset from the API request cleanup so the two don't overlap
+    await emailBodyCleanupQueue.add(
+      'cleanup-old-email-bodies',
+      {},
+      {
+        repeat: {
+          pattern: '0 4 * * *', // Daily at 4 AM
+        },
+        jobId: 'email-body-cleanup-repeatable', // Fixed ID to prevent duplicates
       },
-      jobId: 'email-body-cleanup-repeatable', // Fixed ID to prevent duplicates
-    },
-  );
+    );
 
-  signale.info('[BACKGROUND-JOB] Email body cleanup scheduled (BullMQ repeatable job, runs daily at 4 AM)');
+    signale.info('[BACKGROUND-JOB] Email body cleanup scheduled (BullMQ repeatable job, runs daily at 4 AM)');
+  }
 });

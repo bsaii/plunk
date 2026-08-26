@@ -1,6 +1,8 @@
 import {Controller, Delete, Get, Middleware, Patch, Post} from '@overnightjs/core';
 import type {NextFunction, Request, Response} from 'express';
+import signale from 'signale';
 import {requireAuth, requireEmailVerified} from '../middleware/auth.js';
+import {QueueService} from '../services/QueueService.js';
 import {SegmentService} from '../services/SegmentService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 
@@ -197,7 +199,7 @@ export class Segments {
 
   /**
    * POST /segments/:id/compute
-   * Recompute segment membership for all contacts
+   * Queue recomputation of segment membership for all contacts
    */
   @Post(':id/compute')
   @Middleware([requireAuth, requireEmailVerified])
@@ -210,9 +212,47 @@ export class Segments {
       return res.status(400).json({error: 'Segment ID is required'});
     }
 
-    const result = await SegmentService.computeMembership(auth.projectId!, segmentId);
+    // Verify segment exists/is authorized before queueing (computeMembership itself
+    // would throw for a missing/unauthorized segment, but that's now the job's job)
+    await SegmentService.get(auth.projectId!, segmentId);
 
-    return res.status(200).json(result);
+    const job = await QueueService.queueSegmentCountUpdate(auth.projectId!, segmentId);
+
+    return res.status(202).json({
+      status: 'queued',
+      jobId: job.id,
+    });
+  }
+
+  /**
+   * GET /segments/:id/compute/:jobId
+   * Get the status of a queued segment compute job
+   */
+  @Get(':id/compute/:jobId')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  public async getComputeStatus(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    const jobId = req.params.jobId;
+
+    if (!jobId) {
+      return res.status(400).json({error: 'Job ID is required'});
+    }
+
+    try {
+      const status = await QueueService.getSegmentComputeJobStatus(jobId, auth.projectId!);
+
+      if (!status) {
+        return res.status(404).json({error: 'Segment compute job not found'});
+      }
+
+      return res.status(200).json(status);
+    } catch (error) {
+      signale.error('[SEGMENTS] Failed to get compute status:', error);
+      return res.status(500).json({
+        error: error instanceof Error ? error.message : 'Failed to get compute status',
+      });
+    }
   }
 
   /**

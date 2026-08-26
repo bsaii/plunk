@@ -2,6 +2,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {WorkflowExecutionStatus, WorkflowStepType, WorkflowTriggerType} from '@plunk/db';
 import {WorkflowService} from '../WorkflowService';
 import {Keys} from '../keys';
+import {QueueService} from '../QueueService';
 import {factories, getPrismaClient} from '../../../../../test/helpers';
 
 // Mock Redis for caching tests - must be inline to avoid hoisting issues
@@ -1003,6 +1004,36 @@ describe('WorkflowService', () => {
       expect(execution.status).toBe(WorkflowExecutionStatus.RUNNING);
     });
 
+    it('should enqueue the trigger step rather than executing it inline', async () => {
+      const queueWorkflowStepSpy = vi
+        .spyOn(QueueService, 'queueWorkflowStep')
+        .mockResolvedValue({id: 'mock-job-id'} as unknown as Awaited<ReturnType<typeof QueueService.queueWorkflowStep>>);
+
+      try {
+        const workflow = await factories.createWorkflow({
+          projectId,
+          enabled: true,
+        });
+        const contact = await factories.createContact({projectId});
+
+        const execution = await WorkflowService.startExecution(projectId, workflow.id, contact.id);
+
+        const triggerStep = await prisma.workflowStep.findFirst({
+          where: {workflowId: workflow.id, type: WorkflowStepType.TRIGGER},
+        });
+
+        expect(queueWorkflowStepSpy).toHaveBeenCalledWith(execution.id, triggerStep!.id);
+
+        // No step executions should have been created inline - that's the queued job's job.
+        const stepExecutions = await prisma.workflowStepExecution.findMany({
+          where: {executionId: execution.id},
+        });
+        expect(stepExecutions).toHaveLength(0);
+      } finally {
+        queueWorkflowStepSpy.mockRestore();
+      }
+    });
+
     it('should throw error when workflow is disabled', async () => {
       const workflow = await factories.createWorkflow({
         projectId,
@@ -1074,9 +1105,9 @@ describe('WorkflowService', () => {
       });
       const contact = await factories.createContact({projectId});
 
-      // Insert a RUNNING execution directly to avoid racing with the background
-      // step processor that startExecution kicks off (a trigger-only workflow can
-      // transition to COMPLETED before the second call observes it as RUNNING).
+      // Insert a RUNNING execution directly rather than via startExecution, since
+      // that only enqueues the trigger step for async processing (no inline
+      // execution to race with here).
       const triggerStep = await prisma.workflowStep.findFirst({
         where: {workflowId: workflow.id, type: WorkflowStepType.TRIGGER},
       });

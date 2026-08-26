@@ -8,6 +8,7 @@ import {prisma} from '../database/prisma.js';
 import {redis} from '../database/redis.js';
 import {Keys} from './keys.js';
 
+import {QueueService} from './QueueService.js';
 import {WorkflowExecutionService} from './WorkflowExecutionService.js';
 
 /**
@@ -495,8 +496,9 @@ export class EventService {
         `[EVENT] Started workflow ${workflowId} execution ${execution.id} for contact ${contactId}${workflow.allowReentry ? ' (re-entry allowed)' : ''}`,
       );
 
-      // Start executing the workflow
-      await WorkflowExecutionService.processStepExecution(execution.id, triggerStep.id);
+      // Queue the workflow's trigger step rather than executing it inline, so
+      // the HTTP request that triggered this event doesn't block on workflow execution.
+      await QueueService.queueWorkflowStep(execution.id, triggerStep.id);
     } catch (error) {
       signale.error(`[EVENT] Error starting workflow ${workflowId}:`, error);
     }

@@ -68,6 +68,12 @@ variable "worker_image" {
   default     = "us-docker.pkg.dev/cloudrun/container/hello"
 }
 
+variable "maintenance_image" {
+  description = "Container image for the plunk-maintenance job (maintenance-runner target, same image family as the API). Only used on first apply; cloudbuild.yaml's update-maintenance-job step owns the image afterwards."
+  type        = string
+  default     = "us-docker.pkg.dev/cloudrun/container/hello"
+}
+
 # --- Domains --------------------------------------------------------------
 
 variable "api_domain" {
@@ -137,6 +143,18 @@ variable "worker_secret_env_vars" {
   default     = {}
 }
 
+variable "maintenance_env_vars" {
+  description = "Non-secret environment variables for the plunk-maintenance job. Needs the same subset of the API's vars as plunk-worker — see docs/deploy-cloud-build.md's \"Worker environment variables\" section."
+  type        = map(string)
+  default     = {}
+}
+
+variable "maintenance_secret_env_vars" {
+  description = "Map of env var name to Secret Manager secret ID for plunk-maintenance's secret values."
+  type        = map(string)
+  default     = {}
+}
+
 # --- Explicit compute sizing -------------------------------------------------
 # Defaults match docs/deploy-cloud-run.md / docs/deploy-cloud-build.md's
 # bootstrap commands. Override per environment in a *.tfvars file (see
@@ -159,6 +177,12 @@ variable "api_max_instance_count" {
   description = "Maximum autoscaled instance count for plunk-api."
   type        = number
   default     = 10
+}
+
+variable "api_min_instance_count" {
+  description = "Minimum instance count for plunk-api. Defaults to 0 (scale-to-zero, request-based billing) now that Phase 0's workflow-execution fix removed the synchronous/fire-and-forget-after-response risk that made an always-warm instance a correctness crutch rather than just a cold-start nicety. Set to 1 to restore an always-warm instance (no cold starts) if that proves worth the extra always-on cost."
+  type        = number
+  default     = 0
 }
 
 variable "web_cpu" {
@@ -207,4 +231,16 @@ variable "worker_instance_count" {
   description = "Fixed instance count for plunk-worker (manual scaling — see worker.tf's scaling block). Kept at 1 by default — unlike plunk-web, the BullMQ worker has no HTTP entrypoint to cold-start on, so scaling to zero means queued jobs simply wait until an instance is scaled back up. Raise this by hand if queue throughput needs more than one instance; Worker Pools do not autoscale on load the way a Cloud Run service does."
   type        = number
   default     = 1
+}
+
+variable "maintenance_cpu" {
+  description = "vCPU allocation for the plunk-maintenance job."
+  type        = string
+  default     = "1"
+}
+
+variable "maintenance_memory" {
+  description = "Memory allocation for the plunk-maintenance job."
+  type        = string
+  default     = "512Mi"
 }

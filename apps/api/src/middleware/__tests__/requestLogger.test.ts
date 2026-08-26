@@ -356,11 +356,15 @@ describe('Request Logger Middleware', () => {
 
     it('should not block response if database logging fails', async () => {
       // Simulate database error by using invalid data
+      const jsonMock = vi.fn(function (this: Response, body: unknown) {
+        return body;
+      });
       const resInvalid = {
         ...res,
         locals: {
           requestId: null as unknown, // Invalid request ID - will cause database error
         },
+        json: jsonMock,
       };
 
       databaseRequestLogger(req as Request, resInvalid as Response, next);
@@ -368,14 +372,18 @@ describe('Request Logger Middleware', () => {
       // Should not throw and should call next
       expect(next).toHaveBeenCalled();
 
-      // Response should still work even if logging fails
+      // res.json() returns synchronously without waiting on the (failing) DB write
       const result = resInvalid.json!({success: true});
-      expect(result).toEqual({success: true});
+      expect(result).toBe(resInvalid);
 
-      // Wait for async logging to fail silently
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // The response is still sent (via the captured original json) once the
+      // logging attempt settles, even though it failed
+      const deadline = Date.now() + 2000;
+      while (jsonMock.mock.calls.length === 0 && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
 
-      // The logging should have failed but not affected the response
+      expect(jsonMock).toHaveBeenCalledWith({success: true});
     });
   });
 
