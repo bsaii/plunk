@@ -100,6 +100,9 @@ CMD ["node", "apps/api/dist/app.js"]
 FROM api-runner AS worker-runner
 CMD ["node", "apps/api/dist/jobs/worker.js"]
 
+FROM api-runner AS worker-server
+CMD ["node", "apps/api/dist/jobs/worker-server.js"]
+
 # =============================================================================
 # Maintenance Cloud Run Job (same runtime as the API, different entrypoint)
 #

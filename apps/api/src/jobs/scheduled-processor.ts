@@ -5,7 +5,7 @@
 
 import {CampaignStatus} from '@plunk/db';
 import type {ScheduledCampaignJobData} from '@plunk/types';
-import {type Job, Worker} from 'bullmq';
+import {Worker} from 'bullmq';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
@@ -15,8 +15,30 @@ import {scheduledQueue} from '../services/QueueService.js';
 export function createScheduledCampaignWorker() {
   const worker = new Worker<ScheduledCampaignJobData>(
     scheduledQueue.name,
-    async (job: Job<ScheduledCampaignJobData>) => {
-      const {campaignId} = job.data;
+    job => processScheduledCampaignJob(job.data),
+    {
+      connection: scheduledQueue.opts.connection,
+      concurrency: 2,
+    },
+  );
+
+  worker.on('completed', job => {
+    signale.info(`[SCHEDULED-PROCESSOR] Job ${job.id} completed`);
+  });
+
+  worker.on('failed', (job, err) => {
+    signale.error(`[SCHEDULED-PROCESSOR] Job ${job?.id} failed:`, err.message);
+  });
+
+  worker.on('error', err => {
+    signale.error('[SCHEDULED-PROCESSOR] Worker error:', err);
+  });
+
+  return worker;
+}
+
+export async function processScheduledCampaignJob(data: ScheduledCampaignJobData): Promise<void> {
+      const {campaignId} = data;
 
       signale.info(`[SCHEDULED-PROCESSOR] Processing scheduled campaign ${campaignId}`);
 
@@ -59,24 +81,4 @@ export function createScheduledCampaignWorker() {
       await CampaignService.startSending(campaign.projectId, campaignId);
 
       signale.info(`[SCHEDULED-PROCESSOR] Started sending campaign ${campaignId}`);
-    },
-    {
-      connection: scheduledQueue.opts.connection,
-      concurrency: 2, // Process up to 2 scheduled campaigns concurrently
-    },
-  );
-
-  worker.on('completed', job => {
-    signale.info(`[SCHEDULED-PROCESSOR] Job ${job.id} completed`);
-  });
-
-  worker.on('failed', (job, err) => {
-    signale.error(`[SCHEDULED-PROCESSOR] Job ${job?.id} failed:`, err.message);
-  });
-
-  worker.on('error', err => {
-    signale.error('[SCHEDULED-PROCESSOR] Worker error:', err);
-  });
-
-  return worker;
 }

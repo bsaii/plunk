@@ -87,6 +87,16 @@ export const DIRECT_DATABASE_URL = validateEnv('DIRECT_DATABASE_URL');
 // only the 'bullmq' branch is meaningful until that work lands.
 export const QUEUE_BACKEND = validateEnv('QUEUE_BACKEND', 'bullmq') as 'bullmq' | 'cloud-tasks';
 
+// Real-time queues are intentionally activated separately from QUEUE_BACKEND.
+// Phase 1 uses QUEUE_BACKEND=cloud-tasks for maintenance scheduling; Phase 3
+// flips this flag only after the Cloud Tasks queues and worker service exist.
+export const REALTIME_QUEUE_BACKEND = validateEnv('REALTIME_QUEUE_BACKEND', 'bullmq') as 'bullmq' | 'cloud-tasks';
+export const CLOUD_TASKS_PROJECT_ID = validateEnv('CLOUD_TASKS_PROJECT_ID', '');
+export const CLOUD_TASKS_LOCATION = validateEnv('CLOUD_TASKS_LOCATION', '');
+export const CLOUD_TASKS_WORKER_URL = validateEnv('CLOUD_TASKS_WORKER_URL', '');
+export const CLOUD_TASKS_AUDIENCE = validateEnv('CLOUD_TASKS_AUDIENCE', '');
+export const CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL = validateEnv('CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL', '');
+
 // OAuth (optional - for social login)
 export const GITHUB_OAUTH_CLIENT = validateEnv('GITHUB_OAUTH_CLIENT', '');
 export const GITHUB_OAUTH_SECRET = validateEnv('GITHUB_OAUTH_SECRET', '');

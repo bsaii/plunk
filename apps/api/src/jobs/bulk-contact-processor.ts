@@ -5,12 +5,13 @@
 
 import {Prisma} from '@plunk/db';
 import type {BulkContactActionJobData, BulkContactActionSelector} from '@plunk/types';
-import {type Job, Worker} from 'bullmq';
+import {Worker} from 'bullmq';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {ContactService} from '../services/ContactService.js';
 import {bulkContactQueue} from '../services/QueueService.js';
+import type {QueueJobContext} from '../queue/types.js';
 
 const BATCH_SIZE = 100;
 
@@ -59,11 +60,11 @@ async function applyBatch(
   }
 }
 
-export function createBulkContactWorker() {
-  const worker = new Worker<BulkContactActionJobData>(
-    bulkContactQueue.name,
-    async (job: Job<BulkContactActionJobData>) => {
-      const {projectId, operation, selector} = job.data;
+export async function processBulkContactJob(
+  data: BulkContactActionJobData,
+  context: QueueJobContext = {},
+): Promise<BulkActionResult> {
+      const {projectId, operation, selector} = data;
 
       const result: BulkActionResult = {
         operation,
@@ -73,6 +74,12 @@ export function createBulkContactWorker() {
         failureCount: 0,
         errors: [],
       };
+
+      const project = await prisma.project.findUnique({where: {id: projectId}, select: {disabled: true}});
+      if (project?.disabled) {
+        signale.warn(`[BULK-CONTACT-PROCESSOR] Project ${projectId} is disabled, skipping bulk action`);
+        return result;
+      }
 
       if (selector.mode === 'ids') {
         const {contactIds} = selector;
@@ -99,7 +106,7 @@ export function createBulkContactWorker() {
               error: error instanceof Error ? error.message : 'Batch processing failed',
             });
           }
-          await job.updateProgress(Math.round(((i + batchIds.length) / contactIds.length) * 100));
+          await context.updateProgress?.(Math.round(((i + batchIds.length) / contactIds.length) * 100));
         }
       } else {
         const where = buildQueryWhere(projectId, selector);
@@ -111,7 +118,7 @@ export function createBulkContactWorker() {
         );
 
         if (total === 0) {
-          await job.updateProgress(100);
+          await context.updateProgress?.(100);
           return result;
         }
 
@@ -157,7 +164,7 @@ export function createBulkContactWorker() {
           }
 
           processedRows += batchIds.length;
-          await job.updateProgress(Math.min(100, Math.round((processedRows / total) * 100)));
+          await context.updateProgress?.(Math.min(100, Math.round((processedRows / total) * 100)));
 
           if (batch.length < BATCH_SIZE) break;
         }
@@ -167,11 +174,13 @@ export function createBulkContactWorker() {
         `[BULK-CONTACT-PROCESSOR] ${operation} completed: ${result.successCount} succeeded, ${result.failureCount} failed`,
       );
       return result;
-    },
-    {
-      connection: bulkContactQueue.opts.connection,
-      concurrency: 3,
-    },
+}
+
+export function createBulkContactWorker() {
+  const worker = new Worker<BulkContactActionJobData>(
+    bulkContactQueue.name,
+    job => processBulkContactJob(job.data, {updateProgress: progress => job.updateProgress(progress)}),
+    {connection: bulkContactQueue.opts.connection, concurrency: 3},
   );
 
   worker.on('completed', job => {
