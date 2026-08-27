@@ -1,8 +1,8 @@
 # Plunk — GCP Terraform
 
 Manages `plunk-api`, `plunk-web`, the `plunk-migrate` and `plunk-maintenance` Cloud Run Jobs (the
-latter driven by 5 Cloud Scheduler entries — see "Maintenance jobs" below), and the `plunk-worker`
-Cloud Run Worker Pool — plus everything a GCP project needs before any of that can exist: the
+latter driven by 5 Cloud Scheduler entries — see "Maintenance jobs" below), and the internal `plunk-worker`
+Cloud Run service for Cloud Tasks — plus everything a GCP project needs before any of that can exist: the
 required APIs, the Artifact Registry repo, and every runtime/build service account and IAM binding
 (`services.tf` / `iam.tf`).
 
@@ -18,7 +18,7 @@ scaling/CPU-allocation fields, so the diff is checked against reality rather tha
 ## Division of labor with `cloudbuild.yaml`
 
 `cloudbuild.yaml` (repo root) still owns building and rolling out container images on every
-merge (`gcloud run deploy` / `gcloud run jobs update` / `gcloud run worker-pools update`). This
+merge (`gcloud run deploy` / `gcloud run jobs update`). This
 Terraform owns everything else: the APIs and Artifact Registry repo Cloud Build pushes into
 (`services.tf`), every service account and IAM grant Cloud Build and the Cloud Run resources
 themselves need (`iam.tf`), scaling (`min_instance_count`/`max_instance_count`), CPU/memory,
@@ -73,10 +73,7 @@ This is the GCP-deployment equivalent of the same 5 sweeps that self-hosted depl
 as BullMQ in-process repeatable jobs (`app.ts`, registered on boot) — the `QUEUE_BACKEND` env var
 (`api_env_vars`/`maintenance_env_vars`, defaults to `bullmq`) is what tells `app.ts` to skip
 registering them there once this deployment sets it to `cloud-tasks`, so the two scheduling
-mechanisms never double-run the same sweep. Only the 5 maintenance tasks moved off BullMQ this way
-— the 7 real-time queues (email, campaign, workflow, import, etc.) still run on `plunk-worker`'s
-BullMQ workers; see the repo's tracked GitHub issues for the (larger, deferred) Cloud Tasks
-migration that eventually replaces those too.
+mechanisms never double-run the same sweep. The seven real-time queues also use Cloud Tasks and are delivered to the internal `plunk-worker` Cloud Run service. See [operations.md](operations.md) for verification and monitoring.
 
 Force-run one task on demand (e.g. to smoke-test after a deploy) rather than waiting for its
 schedule:
