@@ -37,9 +37,9 @@ web_max_instance_count = 10
 migrate_cpu    = "1"
 migrate_memory = "512Mi"
 
-worker_cpu            = "1"
-worker_memory         = "512Mi"
-worker_instance_count = 1
+worker_cpu                = "1"
+worker_memory             = "512Mi"
+worker_max_instance_count = 10
 
 maintenance_cpu    = "1"
 maintenance_memory = "512Mi"
@@ -73,7 +73,14 @@ api_env_vars = {
   # bulk-contact/meter still run on plunk-worker's BullMQ workers regardless
   # of this setting, until the (larger, separately tracked) Cloud Tasks
   # migration replaces those too.
-  QUEUE_BACKEND = "cloud-tasks"
+  QUEUE_BACKEND          = "cloud-tasks"
+  REALTIME_QUEUE_BACKEND = "cloud-tasks"
+
+  CLOUD_TASKS_PROJECT_ID            = "REPLACE_WITH_YOUR_GCP_PROJECT_ID"
+  CLOUD_TASKS_LOCATION              = "us-central1"
+  CLOUD_TASKS_WORKER_URL            = "REPLACE_WITH_WORKER_SERVICE_URL"
+  CLOUD_TASKS_AUDIENCE              = "REPLACE_WITH_WORKER_SERVICE_URL"
+  CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL = "REPLACE_WITH_CLOUD_TASKS_INVOKER_SERVICE_ACCOUNT_EMAIL"
 
   AWS_SES_REGION                    = "REPLACE_WITH_YOUR_AWS_SES_REGION" # (from AWS) e.g. us-east-1
   SES_CONFIGURATION_SET             = "REPLACE_WITH_YOUR_SES_CONFIGURATION_SET"
@@ -104,7 +111,13 @@ migrate_env_vars = {
 # imports the same constants.ts, so the worker crashes at boot without it
 # too.
 worker_env_vars = {
-  NODE_ENV      = "production"
+  NODE_ENV               = "production"
+  REALTIME_QUEUE_BACKEND = "cloud-tasks"
+  CLOUD_TASKS_PROJECT_ID            = "REPLACE_WITH_YOUR_GCP_PROJECT_ID"
+  CLOUD_TASKS_LOCATION              = "us-central1"
+  CLOUD_TASKS_WORKER_URL            = "REPLACE_WITH_WORKER_SERVICE_URL"
+  CLOUD_TASKS_AUDIENCE              = "REPLACE_WITH_WORKER_SERVICE_URL"
+  CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL = "REPLACE_WITH_CLOUD_TASKS_INVOKER_SERVICE_ACCOUNT_EMAIL"
   API_URI       = "https://REPLACE_WITH_YOUR_API_DOMAIN"
   DASHBOARD_URI = "https://REPLACE_WITH_YOUR_WEB_DOMAIN"
   LANDING_URI   = "REPLACE_WITH_YOUR_LANDING_URI"
