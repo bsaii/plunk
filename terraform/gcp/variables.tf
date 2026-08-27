@@ -63,7 +63,7 @@ variable "migrate_image" {
 }
 
 variable "worker_image" {
-  description = "Container image for the plunk-worker Cloud Run Worker Pool (worker-runner target, same image family as the API). Only used on first apply; cloudbuild.yaml's update-worker-pool step owns the image afterwards."
+  description = "Container image for the internal plunk-worker Cloud Run service (worker-server target). Only used on first apply; Cloud Build deploys later revisions."
   type        = string
   default     = "us-docker.pkg.dev/cloudrun/container/hello"
 }
@@ -132,13 +132,13 @@ variable "migrate_secret_env_vars" {
 }
 
 variable "worker_env_vars" {
-  description = "Non-secret environment variables for the plunk-worker Worker Pool. The worker only needs a SUBSET of the API's vars — see docs/deploy-cloud-build.md's \"Worker environment variables\" section."
+  description = "Non-secret environment variables for the internal Cloud Tasks plunk-worker service."
   type        = map(string)
   default     = {}
 }
 
 variable "worker_secret_env_vars" {
-  description = "Map of env var name to Secret Manager secret ID for plunk-worker's secret values."
+  description = "Map of env var name to Secret Manager secret ID for the internal plunk-worker service."
   type        = map(string)
   default     = {}
 }
@@ -227,10 +227,10 @@ variable "worker_memory" {
   default     = "512Mi"
 }
 
-variable "worker_instance_count" {
-  description = "Fixed instance count for plunk-worker (manual scaling — see worker.tf's scaling block). Kept at 1 by default — unlike plunk-web, the BullMQ worker has no HTTP entrypoint to cold-start on, so scaling to zero means queued jobs simply wait until an instance is scaled back up. Raise this by hand if queue throughput needs more than one instance; Worker Pools do not autoscale on load the way a Cloud Run service does."
+variable "worker_max_instance_count" {
+  description = "Maximum autoscaled instance count for the internal Cloud Tasks worker service."
   type        = number
-  default     = 1
+  default     = 10
 }
 
 variable "maintenance_cpu" {
