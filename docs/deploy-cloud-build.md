@@ -445,3 +445,17 @@ Run Job triggered by Cloud Scheduler). `landing` and `wiki`
 aren't in `Dockerfile.services` yet — they're still only built as part of the all-in-one image
 (`Dockerfile`). Adding them here later is the same shape as the others: another `build` → `push`
 → `deploy` step chain.
+
+
+## Cloud Tasks worker service
+
+Phase 3 deploys `plunk-worker` as the internal HTTP `worker-server` image.
+Terraform must create it before Cloud Build can deploy it; the
+`check-worker-exists` step intentionally fails until that provisioning apply
+has completed. During the guarded migration, the build also refreshes the
+legacy Worker Pool only when it still exists. After
+`remove_legacy_worker_pool = true`, that transitional update is a no-op.
+
+Follow [deploy-cloud-tasks-worker.md](./deploy-cloud-tasks-worker.md) for the
+provisioning apply, required `CLOUD_TASKS_*` variables, smoke test, and
+cutover.

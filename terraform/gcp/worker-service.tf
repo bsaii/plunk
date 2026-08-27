@@ -1,31 +1,27 @@
-# Legacy plunk-worker BullMQ Worker Pool. Phase 3 provisions the scale-to-zero
-# Cloud Tasks service in worker-service.tf first; this pool remains while the
-# API's REALTIME_QUEUE_BACKEND is bullmq and is removed only by the explicit
-# remove_legacy_worker_pool cutover switch.
-moved {
-  from = google_cloud_run_v2_worker_pool.worker
-  to   = google_cloud_run_v2_worker_pool.worker[0]
-}
-
-resource "google_cloud_run_v2_worker_pool" "worker" {
-  count    = var.remove_legacy_worker_pool ? 0 : 1
+# plunk-worker — internal, scale-to-zero HTTP worker for Cloud Tasks.
+# This is intentionally a Cloud Run Service (not a Job): every Cloud Tasks
+# delivery is an authenticated HTTP request and Cloud Run can cold-start it
+# on demand. The legacy Worker Pool remains in worker.tf until the guarded
+# cutover removes it.
+resource "google_cloud_run_v2_service" "worker_service" {
   name     = "plunk-worker"
   project  = var.project_id
   location = var.region
+  ingress  = "INGRESS_TRAFFIC_INTERNAL_ONLY"
 
   deletion_protection = false
 
   labels = merge(local.common_labels, {
-    component = "worker-legacy"
+    component = "worker"
   })
 
-  scaling {
-    scaling_mode          = "MANUAL"
-    manual_instance_count = var.worker_instance_count
-  }
-
   template {
-    service_account = google_service_account.worker.email
+    scaling {
+      min_instance_count = 0
+      max_instance_count = var.worker_max_instance_count
+    }
+
+    service_account = google_service_account.worker_service.email
 
     containers {
       image = var.worker_image
@@ -35,6 +31,11 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
           cpu    = var.worker_cpu
           memory = var.worker_memory
         }
+        cpu_idle = true
+      }
+
+      ports {
+        container_port = 8080
       }
 
       dynamic "env" {
@@ -66,5 +67,5 @@ resource "google_cloud_run_v2_worker_pool" "worker" {
     ]
   }
 
-  depends_on = [time_sleep.worker_secret_iam_propagation]
+  depends_on = [time_sleep.worker_service_secret_iam_propagation]
 }

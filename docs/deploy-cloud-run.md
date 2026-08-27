@@ -168,3 +168,14 @@ services (the shared `.example.com` cookie domain is what makes the session work
   Drop it only if you put IAP or another proxy in front.
 - The dashboard is stateless, so `--max-instances` can be raised freely; the API and database are
   the scaling constraint, not this service.
+
+
+## Internal Cloud Tasks worker
+
+The real-time worker is not public and is not deployed with
+`--allow-unauthenticated`. Terraform creates `plunk-worker` with
+`INGRESS_TRAFFIC_INTERNAL_ONLY`, zero minimum instances, and an IAM binding
+only for the dedicated Cloud Tasks OIDC identity. Use the Cloud Build
+`deploy-worker` step to roll its image. The full provision-first cutover,
+including its runtime environment values, is in
+[deploy-cloud-tasks-worker.md](./deploy-cloud-tasks-worker.md).

@@ -1,10 +1,10 @@
 # =============================================================================
-# Cloud Build pipeline: api + web + worker + maintenance
+# Cloud Build pipeline: api + web + Cloud Tasks worker + maintenance
 # =============================================================================
 # Builds the "api", "web", "worker" and "maintenance" service images (see
 # Dockerfile.services) on Google's build infrastructure instead of your local
 # machine, pushes them to Artifact Registry, then rolls each Cloud Run
-# service/job/worker pool over to the new image.
+# service/job/worker over to the new image.
 #
 # Why Cloud Build instead of `docker build` in Cloud Shell: Cloud Shell's VM
 # has a small local disk, and this monorepo's build (installing dependencies
@@ -89,7 +89,7 @@ substitutions:
   _API_SERVICE: plunk-api # Cloud Run service name for the API
   _WEB_SERVICE: plunk-web # Cloud Run service name for the web dashboard
   _MIGRATE_JOB: plunk-migrate # Cloud Run Job that runs `prisma migrate deploy` off the api image
-  _WORKER_POOL: plunk-worker # Cloud Run Worker Pool running the BullMQ worker
+  _WORKER_SERVICE: plunk-worker # internal Cloud Run service receiving Cloud Tasks\n  _WORKER_POOL: plunk-worker # legacy BullMQ Worker Pool, retained only until cutover
   _MAINTENANCE_JOB: plunk-maintenance # Cloud Run Job that runs the 5 scheduled maintenance tasks off the api image
   _TAG: latest # normally overridden per-run with the commit SHA (see above)
 
@@ -320,19 +320,10 @@ steps:
       ]
 
   # ---------------------------------------------------------------------
-  # 4. Worker image: build, push, update the Worker Pool.
-  #
-  #    apps/api/src/jobs/worker.ts is a pure background process (it never
-  #    binds an HTTP port), which is exactly what Cloud Run Worker Pools are
-  #    for — unlike a regular Cloud Run service, a worker pool never expects
-  #    the container to listen on $PORT or pass an HTTP health check.
-  #    terraform/gcp/worker.tf now creates the Worker Pool itself; this step
-  #    deliberately still uses `worker-pools update`, NOT `create` and NOT
-  #    `deploy` — matching the same fail-fast-if-missing pattern as
-  #    update-migrate-job: if plunk-worker somehow doesn't exist yet (e.g.
-  #    Terraform hasn't been applied), `update` fails loudly instead of
-  #    silently creating a brand-new pool with none of its real
-  #    configuration (env vars, scaling, service account).
+  # 4. Worker image: deploy the internal Cloud Tasks worker service.
+  # Terraform creates the service first; this check preserves the existing
+  # fail-loud bootstrap behavior instead of silently creating a service with
+  # missing IAM, ingress, and environment configuration.
   # ---------------------------------------------------------------------
   - id: build-worker
     name: gcr.io/cloud-builders/docker
@@ -343,7 +334,7 @@ steps:
         "build",
         "--platform=linux/amd64",
         "--build-arg=PLUNK_VERSION=${_TAG}",
-        "--target=worker-runner",
+        "--target=worker-server",
         "-t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/worker:${_TAG}",
         "-f=Dockerfile.services",
         ".",
@@ -358,22 +349,71 @@ steps:
         "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/worker:${_TAG}",
       ]
 
-  - id: update-worker-pool
+  - id: check-worker-exists
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
-    waitFor: ["push-worker"]
     args:
       [
         "run",
-        "worker-pools",
-        "update",
-        "${_WORKER_POOL}",
+        "services",
+        "describe",
+        "${_WORKER_SERVICE}",
+        "--region=${_REGION}",
+        "--format=value(metadata.name)",
+      ]
+
+  - id: deploy-worker
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    waitFor: ["push-worker", "check-worker-exists"]
+    args:
+      [
+        "run",
+        "deploy",
+        "${_WORKER_SERVICE}",
         "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/worker:${_TAG}",
         "--region=${_REGION}",
       ]
 
+  # Transitional only: the legacy Worker Pool continues to run BullMQ until
+  # Terraform's remove_legacy_worker_pool cutover. Keep its image fresh while
+  # it exists, then no-op on later builds after Terraform removes it.
+  - id: build-legacy-worker
+    name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    waitFor: ["build-base", "build-prod-deps"]
+    args:
+      [
+        "build",
+        "--platform=linux/amd64",
+        "--build-arg=PLUNK_VERSION=${_TAG}",
+        "--target=worker-runner",
+        "-t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/worker-legacy:${_TAG}",
+        "-f=Dockerfile.services",
+        ".",
+      ]
+
+  - id: push-legacy-worker
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["build-legacy-worker"]
+    args:
+      [
+        "push",
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/worker-legacy:${_TAG}",
+      ]
+
+  - id: update-legacy-worker-pool-if-present
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    waitFor: ["push-legacy-worker"]
+    args:
+      - -ceu
+      - |
+        if gcloud run worker-pools describe "${_WORKER_POOL}" --region="${_REGION}" --format='value(metadata.name)' >/dev/null 2>&1; then
+          gcloud run worker-pools update "${_WORKER_POOL}" --image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/worker-legacy:${_TAG}" --region="${_REGION}"
+        fi
+
 # Steps above already `docker push` explicitly (so the image exists in the
 # registry before the deploy step that needs it — the alternative, listing
-# images here under a top-level `images:` key, only pushes *after* every
-# step finishes, which would be too late for `deploy-api`/`deploy-web`/
-# `update-worker-pool`/`update-maintenance-job`).
+# images here under a top-level `images:` key, only pushes after every
+# step finishes, which would be too late for the deploy/update steps).
