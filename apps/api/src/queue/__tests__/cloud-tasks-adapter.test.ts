@@ -30,6 +30,23 @@ describe('CloudTasksAdapter', () => {
     vi.useRealTimers();
   });
 
+  it('treats an existing deterministic task as an idempotent enqueue', async () => {
+    const createTask = vi.fn().mockRejectedValue({code: 6});
+    const adapter = createCloudTasksAdapter(
+      {
+        projectId: 'project',
+        location: 'region',
+        workerUrl: 'https://worker.example.com',
+        audience: 'https://worker.example.com',
+        serviceAccountEmail: 'tasks@example.iam.gserviceaccount.com',
+      },
+      {queuePath: () => 'queue-path', createTask},
+      () => 'job-1',
+    );
+
+    await expect(adapter.enqueue('email', {emailId: 'email-1'}, {jobId: 'job-1'})).resolves.toMatchObject({id: 'job-1'});
+  });
+
   it('uses a distinct deterministic name for each long-delay hop', async () => {
     const createTask = vi.fn().mockResolvedValue([{name: 'task-name'}]);
     const adapter = createCloudTasksAdapter(
@@ -45,7 +62,7 @@ describe('CloudTasksAdapter', () => {
     );
 
     await adapter.enqueue('email', {emailId: 'email-1'}, {jobId: 'job-1'});
-    await adapter.enqueue('email', {emailId: 'email-1'}, {jobId: 'job-1', cloudTaskHop: 1} as never);
+    await adapter.enqueue('email', {emailId: 'email-1'}, {jobId: 'job-1', cloudTaskHop: 1});
 
     expect(createTask.mock.calls[0][0].task.name).toBe('queue-path/tasks/job-1-hop-0');
     expect(createTask.mock.calls[1][0].task.name).toBe('queue-path/tasks/job-1-hop-1');
