@@ -1,0 +1,203 @@
+# Example values for the GCP Cloud Run + load balancer stack.
+#
+# Copy this file to production.tfvars (or a differently-named
+# <environment>.tfvars for a non-production environment) and fill in every
+# REPLACE_WITH_* placeholder before running `terraform plan`. The copy is
+# gitignored (see the root .gitignore's `*.tfvars` / `!*.tfvars.example`
+# rules) — it pins values specific to your GCP project and must never be
+# committed.
+#
+# Values commented "(from AWS)" come from your AWS account / terraform/aws
+# stack. If you're filling this in from GCP Cloud Shell, it has no AWS
+# credentials — fetch these from wherever you do have AWS access (your own
+# workstation, or `terraform output` in terraform/aws) and paste the plain
+# (non-secret) values in here; the actual secret values never go in this
+# file — see the *_secret_env_vars maps and this directory's README.
+project_id  = "REPLACE_WITH_YOUR_GCP_PROJECT_ID"
+region      = "us-central1"
+environment = "production"
+
+api_domain = "REPLACE_WITH_YOUR_API_DOMAIN" # e.g. api.example.com
+web_domain = "REPLACE_WITH_YOUR_WEB_DOMAIN" # e.g. app.example.com
+
+# --- Explicit compute sizing --------------------------------------------
+# Sane starting points, not project-specific — pinned here (rather than left
+# to variables.tf's defaults) so `terraform plan` is always the source of
+# truth for what's actually provisioned, per this directory's README. Adjust
+# after checking real usage against the GCP Pricing Calculator / Cloud
+# Monitoring.
+api_cpu                = "1"
+api_memory             = "512Mi"
+api_max_instance_count = 10
+
+web_cpu                = "1"
+web_memory             = "512Mi"
+web_max_instance_count = 10
+
+migrate_cpu    = "1"
+migrate_memory = "512Mi"
+
+worker_cpu                = "1"
+worker_memory             = "512Mi"
+worker_max_instance_count = 10
+
+maintenance_cpu    = "1"
+maintenance_memory = "512Mi"
+
+# --- Non-secret environment variables -----------------------------------
+# AWS_SES_REGION has no default in apps/api/src/app/constants.ts
+# (validateEnv('AWS_SES_REGION') with no fallback) — omitting it crashes
+# api/worker at boot.
+#
+# S3_* values point the API at wherever your uploads bucket actually lives
+# instead of falling back to constants.ts's Minio-dev defaults
+# (S3_ENDPOINT=http://minio:9000, S3_BUCKET=uploads,
+# S3_FORCE_PATH_STYLE=true) — the last of those matters most: leaving it at
+# the true/Minio default makes the API try to set a PUBLIC bucket policy on
+# a real AWS S3 bucket at startup, fighting a private, CloudFront-scoped
+# policy such as terraform/aws manages. If you're using terraform/aws,
+# S3_PUBLIC_URL is that stack's cloudfront_domain_name output.
+
+api_env_vars = {
+  NODE_ENV               = "production"
+  REALTIME_QUEUE_BACKEND = "cloud-tasks"
+  CLOUD_TASKS_PROJECT_ID            = "REPLACE_WITH_YOUR_GCP_PROJECT_ID"
+  CLOUD_TASKS_LOCATION              = "us-central1"
+  CLOUD_TASKS_WORKER_URL            = "REPLACE_WITH_WORKER_SERVICE_URL"
+  CLOUD_TASKS_AUDIENCE              = "REPLACE_WITH_WORKER_SERVICE_URL"
+  CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL = "REPLACE_WITH_CLOUD_TASKS_INVOKER_SERVICE_ACCOUNT_EMAIL"
+  API_URI       = "https://REPLACE_WITH_YOUR_API_DOMAIN"
+  DASHBOARD_URI = "https://REPLACE_WITH_YOUR_WEB_DOMAIN"
+  LANDING_URI   = "REPLACE_WITH_YOUR_LANDING_URI" # e.g. https://www.example.com
+  WIKI_URI      = "REPLACE_WITH_YOUR_WIKI_URI"    # e.g. https://docs.example.com — optional, delete the key to skip
+
+  # Tells app.ts NOT to register the 5 maintenance sweeps as BullMQ in-process
+  # repeatable jobs on boot — this deployment runs them instead as Cloud
+  # Scheduler + plunk-maintenance (maintenance.tf). Leaving this at the
+  # 'bullmq' default here would double-run every sweep once maintenance.tf is
+  # applied. Only these 5 jobs are affected — email/campaign/workflow/import/
+  # bulk-contact/meter still run on plunk-worker's BullMQ workers regardless
+  # of this setting, until the (larger, separately tracked) Cloud Tasks
+  # migration replaces those too.
+  QUEUE_BACKEND          = "cloud-tasks"
+  REALTIME_QUEUE_BACKEND = "cloud-tasks"
+
+  CLOUD_TASKS_PROJECT_ID            = "REPLACE_WITH_YOUR_GCP_PROJECT_ID"
+  CLOUD_TASKS_LOCATION              = "us-central1"
+  CLOUD_TASKS_WORKER_URL            = "REPLACE_WITH_WORKER_SERVICE_URL"
+  CLOUD_TASKS_AUDIENCE              = "REPLACE_WITH_WORKER_SERVICE_URL"
+  CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL = "REPLACE_WITH_CLOUD_TASKS_INVOKER_SERVICE_ACCOUNT_EMAIL"
+
+  AWS_SES_REGION                    = "REPLACE_WITH_YOUR_AWS_SES_REGION" # (from AWS) e.g. us-east-1
+  SES_CONFIGURATION_SET             = "REPLACE_WITH_YOUR_SES_CONFIGURATION_SET"
+  SES_CONFIGURATION_SET_NO_TRACKING = "REPLACE_WITH_YOUR_SES_CONFIGURATION_SET_NO_TRACKING"
+
+  S3_ENDPOINT         = "REPLACE_WITH_YOUR_S3_ENDPOINT"   # (from AWS) e.g. https://s3.us-east-1.amazonaws.com
+  S3_REGION           = "REPLACE_WITH_YOUR_S3_REGION"     # (from AWS)
+  S3_BUCKET           = "REPLACE_WITH_YOUR_S3_BUCKET"     # (from AWS) terraform/aws's bucket_name output
+  S3_PUBLIC_URL       = "REPLACE_WITH_YOUR_S3_PUBLIC_URL" # (from AWS) terraform/aws's cloudfront_domain_name output, with https:// prepended
+  S3_FORCE_PATH_STYLE = "false"
+}
+
+web_env_vars = {
+  API_URI       = "https://REPLACE_WITH_YOUR_API_DOMAIN"
+  DASHBOARD_URI = "https://REPLACE_WITH_YOUR_WEB_DOMAIN"
+  LANDING_URI   = "REPLACE_WITH_YOUR_LANDING_URI"
+  WIKI_URI      = "REPLACE_WITH_YOUR_WIKI_URI"
+}
+
+migrate_env_vars = {
+  NODE_ENV = "production"
+}
+
+# Worker env vars are a SUBSET of the API's — S3_*, OAuth, Stripe price IDs,
+# etc. are HTTP-only and never imported by the worker's code path (see
+# docs/deploy-cloud-build.md's "Worker environment variables" section) — but
+# AWS_SES_REGION is NOT optional here either: apps/api/src/jobs/worker.ts
+# imports the same constants.ts, so the worker crashes at boot without it
+# too.
+worker_env_vars = {
+  NODE_ENV      = "production"
+  API_URI       = "https://REPLACE_WITH_YOUR_API_DOMAIN"
+  DASHBOARD_URI = "https://REPLACE_WITH_YOUR_WEB_DOMAIN"
+  LANDING_URI   = "REPLACE_WITH_YOUR_LANDING_URI"
+  WIKI_URI      = "REPLACE_WITH_YOUR_WIKI_URI"
+
+  AWS_SES_REGION                    = "REPLACE_WITH_YOUR_AWS_SES_REGION" # (from AWS)
+  SES_CONFIGURATION_SET             = "REPLACE_WITH_YOUR_SES_CONFIGURATION_SET"
+  SES_CONFIGURATION_SET_NO_TRACKING = "REPLACE_WITH_YOUR_SES_CONFIGURATION_SET_NO_TRACKING"
+}
+
+# Same subset as worker_env_vars above — the 5 maintenance tasks (domain
+# verification, segment counts, cleanup sweeps) touch the same AWS SES /
+# database surface. QUEUE_BACKEND is deliberately NOT set here: it belongs on
+# api_env_vars (it's app.ts, running as plunk-api, that decides whether to
+# register the BullMQ repeatable jobs) — see this directory's README's
+# "Maintenance jobs" section.
+maintenance_env_vars = {
+  NODE_ENV      = "production"
+  API_URI       = "https://REPLACE_WITH_YOUR_API_DOMAIN"
+  DASHBOARD_URI = "https://REPLACE_WITH_YOUR_WEB_DOMAIN"
+  LANDING_URI   = "REPLACE_WITH_YOUR_LANDING_URI"
+  WIKI_URI      = "REPLACE_WITH_YOUR_WIKI_URI"
+
+  AWS_SES_REGION                    = "REPLACE_WITH_YOUR_AWS_SES_REGION" # (from AWS)
+  SES_CONFIGURATION_SET             = "REPLACE_WITH_YOUR_SES_CONFIGURATION_SET"
+  SES_CONFIGURATION_SET_NO_TRACKING = "REPLACE_WITH_YOUR_SES_CONFIGURATION_SET_NO_TRACKING"
+}
+
+# --- Secret environment variables ---------------------------------------
+# Map values are Secret Manager secret IDs (short names, not full resource
+# paths) — create each one first, e.g.:
+#   gcloud secrets create plunk-jwt-secret --replication-policy=automatic
+#   echo -n "<value>" | gcloud secrets versions add plunk-jwt-secret --data-file=-
+# iam.tf grants each runtime service account roles/secretmanager.secretAccessor
+# scoped to exactly the secrets referenced below — nothing broader. See this
+# directory's README for the full list of `gcloud secrets create` commands,
+# including which values are (from AWS) and must be fetched from outside
+# GCP Cloud Shell.
+
+# STRIPE_SK / STRIPE_WEBHOOK_SECRET are OPTIONAL (constants.ts defaults both
+# to "" and gates STRIPE_ENABLED on them being non-empty — billing features
+# just stay off without them). Add them back below (with real Secret
+# Manager IDs created first) only once billing is wired up.
+api_secret_env_vars = {
+  JWT_SECRET                = "plunk-jwt-secret"
+  DATABASE_URL              = "plunk-database-url"
+  DIRECT_DATABASE_URL       = "plunk-direct-database-url"
+  REDIS_URL                 = "plunk-redis-url"
+  AWS_SES_ACCESS_KEY_ID     = "plunk-ses-access-key-id"     # (from AWS)
+  AWS_SES_SECRET_ACCESS_KEY = "plunk-ses-secret-access-key" # (from AWS)
+  S3_ACCESS_KEY_ID          = "plunk-s3-access-key-id"      # (from AWS)
+  S3_ACCESS_KEY_SECRET      = "plunk-s3-access-key-secret"  # (from AWS)
+}
+
+# The dashboard is a pure frontend (no DB/Redis/S3 credentials — see
+# docs/deploy-cloud-run.md) — nothing to reference here.
+web_secret_env_vars = {}
+
+migrate_secret_env_vars = {
+  DATABASE_URL        = "plunk-database-url"
+  DIRECT_DATABASE_URL = "plunk-direct-database-url"
+}
+
+worker_secret_env_vars = {
+  JWT_SECRET                = "plunk-jwt-secret"
+  DATABASE_URL              = "plunk-database-url"
+  DIRECT_DATABASE_URL       = "plunk-direct-database-url"
+  REDIS_URL                 = "plunk-redis-url"
+  AWS_SES_ACCESS_KEY_ID     = "plunk-ses-access-key-id"     # (from AWS)
+  AWS_SES_SECRET_ACCESS_KEY = "plunk-ses-secret-access-key" # (from AWS)
+}
+
+# Same secrets as worker_secret_env_vars — apps/api/src/app/constants.ts is
+# imported transitively by every job, so all of these are required to boot
+# regardless of which of the 5 maintenance tasks a given execution runs.
+maintenance_secret_env_vars = {
+  JWT_SECRET                = "plunk-jwt-secret"
+  DATABASE_URL              = "plunk-database-url"
+  DIRECT_DATABASE_URL       = "plunk-direct-database-url"
+  REDIS_URL                 = "plunk-redis-url"
+  AWS_SES_ACCESS_KEY_ID     = "plunk-ses-access-key-id"     # (from AWS)
+  AWS_SES_SECRET_ACCESS_KEY = "plunk-ses-secret-access-key" # (from AWS)
+}
