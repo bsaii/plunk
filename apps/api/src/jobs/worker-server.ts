@@ -18,8 +18,7 @@ type VerifyToken = (token: string) => Promise<void>;
 
 const storesProgress = (queue: RealTimeQueueName): boolean => queue === 'import' || queue === 'bulk-contact-actions';
 
-function createGoogleTokenVerifier(): VerifyToken {
-  const client = new OAuth2Client();
+export function createGoogleTokenVerifier(client: Pick<OAuth2Client, 'verifyIdToken'> = new OAuth2Client()): VerifyToken {
   return async token => {
     const ticket = await client.verifyIdToken({idToken: token, audience: CLOUD_TASKS_AUDIENCE});
     if (ticket.getPayload()?.email !== CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL) {
