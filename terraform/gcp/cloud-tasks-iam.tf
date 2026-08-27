@@ -39,8 +39,8 @@ resource "google_cloud_run_v2_service_iam_member" "worker_cloud_tasks_invoker" {
   member   = "serviceAccount:${google_service_account.cloud_tasks_invoker.email}"
 }
 
-# Cloud Tasks' service agent needs to mint the OIDC token for the dedicated
-# invoker identity. This explicit binding also supports older projects where
+# Cloud Tasks' service agent needs permission to use the OIDC invoker
+# identity when generating the task delivery token. This explicit binding also supports older projects where
 # Google did not grant the service agent this permission automatically.
 data "google_project" "current" {
   project_id = var.project_id
@@ -48,7 +48,7 @@ data "google_project" "current" {
 
 resource "google_service_account_iam_member" "cloud_tasks_service_agent_token_creator" {
   service_account_id = google_service_account.cloud_tasks_invoker.name
-  role               = "roles/iam.serviceAccountTokenCreator"
+  role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-cloudtasks.iam.gserviceaccount.com"
 }
 
