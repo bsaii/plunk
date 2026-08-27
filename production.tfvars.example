@@ -59,7 +59,13 @@ maintenance_memory = "512Mi"
 # S3_PUBLIC_URL is that stack's cloudfront_domain_name output.
 
 api_env_vars = {
-  NODE_ENV      = "production"
+  NODE_ENV               = "production"
+  REALTIME_QUEUE_BACKEND = "cloud-tasks"
+  CLOUD_TASKS_PROJECT_ID            = "REPLACE_WITH_YOUR_GCP_PROJECT_ID"
+  CLOUD_TASKS_LOCATION              = "us-central1"
+  CLOUD_TASKS_WORKER_URL            = "REPLACE_WITH_WORKER_SERVICE_URL"
+  CLOUD_TASKS_AUDIENCE              = "REPLACE_WITH_WORKER_SERVICE_URL"
+  CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL = "REPLACE_WITH_CLOUD_TASKS_INVOKER_SERVICE_ACCOUNT_EMAIL"
   API_URI       = "https://REPLACE_WITH_YOUR_API_DOMAIN"
   DASHBOARD_URI = "https://REPLACE_WITH_YOUR_WEB_DOMAIN"
   LANDING_URI   = "REPLACE_WITH_YOUR_LANDING_URI" # e.g. https://www.example.com
@@ -111,13 +117,7 @@ migrate_env_vars = {
 # imports the same constants.ts, so the worker crashes at boot without it
 # too.
 worker_env_vars = {
-  NODE_ENV               = "production"
-  REALTIME_QUEUE_BACKEND = "cloud-tasks"
-  CLOUD_TASKS_PROJECT_ID            = "REPLACE_WITH_YOUR_GCP_PROJECT_ID"
-  CLOUD_TASKS_LOCATION              = "us-central1"
-  CLOUD_TASKS_WORKER_URL            = "REPLACE_WITH_WORKER_SERVICE_URL"
-  CLOUD_TASKS_AUDIENCE              = "REPLACE_WITH_WORKER_SERVICE_URL"
-  CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL = "REPLACE_WITH_CLOUD_TASKS_INVOKER_SERVICE_ACCOUNT_EMAIL"
+  NODE_ENV      = "production"
   API_URI       = "https://REPLACE_WITH_YOUR_API_DOMAIN"
   DASHBOARD_URI = "https://REPLACE_WITH_YOUR_WEB_DOMAIN"
   LANDING_URI   = "REPLACE_WITH_YOUR_LANDING_URI"

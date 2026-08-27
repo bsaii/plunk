@@ -90,7 +90,6 @@ substitutions:
   _WEB_SERVICE: plunk-web # Cloud Run service name for the web dashboard
   _MIGRATE_JOB: plunk-migrate # Cloud Run Job that runs `prisma migrate deploy` off the api image
   _WORKER_SERVICE: plunk-worker # internal Cloud Run service receiving Cloud Tasks
-  _WORKER_POOL: plunk-worker # legacy BullMQ Worker Pool until cutover
   _MAINTENANCE_JOB: plunk-maintenance # Cloud Run Job that runs the 5 scheduled maintenance tasks off the api image
   _TAG: latest # normally overridden per-run with the commit SHA (see above)
 
@@ -376,43 +375,6 @@ steps:
         "--region=${_REGION}",
       ]
 
-  # Transitional only: the legacy Worker Pool continues to run BullMQ until
-  # Terraform's remove_legacy_worker_pool cutover. Keep its image fresh while
-  # it exists, then no-op on later builds after Terraform removes it.
-  - id: build-legacy-worker
-    name: gcr.io/cloud-builders/docker
-    env: ["DOCKER_BUILDKIT=1"]
-    waitFor: ["build-base", "build-prod-deps"]
-    args:
-      [
-        "build",
-        "--platform=linux/amd64",
-        "--build-arg=PLUNK_VERSION=${_TAG}",
-        "--target=worker-runner",
-        "-t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/worker-legacy:${_TAG}",
-        "-f=Dockerfile.services",
-        ".",
-      ]
-
-  - id: push-legacy-worker
-    name: gcr.io/cloud-builders/docker
-    waitFor: ["build-legacy-worker"]
-    args:
-      [
-        "push",
-        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/worker-legacy:${_TAG}",
-      ]
-
-  - id: update-legacy-worker-pool-if-present
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    entrypoint: bash
-    waitFor: ["push-legacy-worker"]
-    args:
-      - -ceu
-      - |
-        if gcloud run worker-pools describe "${_WORKER_POOL}" --region="${_REGION}" --format='value(metadata.name)' >/dev/null 2>&1; then
-          gcloud run worker-pools update "${_WORKER_POOL}" --image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/worker-legacy:${_TAG}" --region="${_REGION}"
-        fi
 
 # Steps above already `docker push` explicitly (so the image exists in the
 # registry before the deploy step that needs it — the alternative, listing

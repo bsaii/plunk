@@ -99,8 +99,9 @@ locals {
 
 # Dedicated identity for Cloud Scheduler itself — separate from
 # google_service_account.maintenance (the Job's own runtime identity while
-# it's executing). This one only ever needs roles/run.invoker on
-# plunk-maintenance, granted below, and nothing else.
+# it's executing). This invokes the Jobs API with container argument overrides. Cloud Run
+# requires roles/run.developer on plunk-maintenance for an invocation that
+# supplies overrides; roles/run.invoker alone returns HTTP 403.
 resource "google_service_account" "scheduler" {
   project      = var.project_id
   account_id   = "plunk-scheduler-run"
@@ -113,7 +114,7 @@ resource "google_cloud_run_v2_job_iam_member" "maintenance_scheduler_invoker" {
   project  = var.project_id
   location = google_cloud_run_v2_job.maintenance.location
   name     = google_cloud_run_v2_job.maintenance.name
-  role     = "roles/run.invoker"
+  role     = "roles/run.developer"
   member   = "serviceAccount:${google_service_account.scheduler.email}"
 }
 

@@ -112,7 +112,9 @@ CMD ["node", "apps/api/dist/jobs/worker-server.js"]
 # no default task baked in. See terraform/gcp/maintenance.tf.
 # =============================================================================
 FROM api-runner AS maintenance-runner
-CMD ["node", "apps/api/dist/jobs/maintenance-runner.js"]
+# Cloud Run replaces CMD when Cloud Scheduler provides an args override.
+# Keep the runner as ENTRYPOINT so --task=<name> reaches process.argv.
+ENTRYPOINT ["node", "apps/api/dist/jobs/maintenance-runner.js"]
 
 # =============================================================================
 # Web dashboard (Next.js standalone)

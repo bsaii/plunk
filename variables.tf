@@ -63,7 +63,7 @@ variable "migrate_image" {
 }
 
 variable "worker_image" {
-  description = "Container image for the internal plunk-worker Cloud Run service (worker-server target). Only used on first apply; Cloud Build deploys later revisions."
+  description = "Container image for the internal plunk-worker Cloud Run service (worker-server target). Only used on first apply; cloudbuild.yaml deploys later revisions."
   type        = string
   default     = "us-docker.pkg.dev/cloudrun/container/hello"
 }
@@ -132,7 +132,7 @@ variable "migrate_secret_env_vars" {
 }
 
 variable "worker_env_vars" {
-  description = "Non-secret environment variables for the internal Cloud Tasks plunk-worker service."
+  description = "Non-secret environment variables for the plunk-worker Worker Pool. The worker only needs a SUBSET of the API's vars — see docs/deploy-cloud-build.md's \"Worker environment variables\" section."
   type        = map(string)
   default     = {}
 }
