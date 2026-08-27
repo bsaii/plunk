@@ -4,22 +4,22 @@
 # next, and campaigns are capped so they cannot starve interactive mail.
 locals {
   realtime_task_queues = {
-    "email-transactional" = { max_attempts = 3, min_backoff = "2s",  max_dispatches_per_second = 100, max_concurrent_dispatches = 100 }
-    "email-workflow"      = { max_attempts = 3, min_backoff = "2s",  max_dispatches_per_second = 50,  max_concurrent_dispatches = 50 }
-    "email-campaign"      = { max_attempts = 3, min_backoff = "2s",  max_dispatches_per_second = 10,  max_concurrent_dispatches = 10 }
-    "campaign"            = { max_attempts = 3, min_backoff = "5s",  max_dispatches_per_second = 10,  max_concurrent_dispatches = 10 }
-    "scheduled"           = { max_attempts = 3, min_backoff = "10s", max_dispatches_per_second = 10,  max_concurrent_dispatches = 10 }
-    "workflow"            = { max_attempts = 3, min_backoff = "2s",  max_dispatches_per_second = 25,  max_concurrent_dispatches = 25 }
-    "import"              = { max_attempts = 2, min_backoff = "5s",  max_dispatches_per_second = 2,   max_concurrent_dispatches = 2 }
-    "bulk-contact-actions" = { max_attempts = 2, min_backoff = "5s", max_dispatches_per_second = 2,  max_concurrent_dispatches = 2 }
-    "meter"               = { max_attempts = 10, min_backoff = "5s", max_dispatches_per_second = 25, max_concurrent_dispatches = 25 }
+    "email-transactional"  = { max_attempts = 3, min_backoff = "2s", max_dispatches_per_second = 100, max_concurrent_dispatches = 100 }
+    "email-workflow"       = { max_attempts = 3, min_backoff = "2s", max_dispatches_per_second = 50, max_concurrent_dispatches = 50 }
+    "email-campaign"       = { max_attempts = 3, min_backoff = "2s", max_dispatches_per_second = 10, max_concurrent_dispatches = 10 }
+    "campaign"             = { max_attempts = 3, min_backoff = "5s", max_dispatches_per_second = 10, max_concurrent_dispatches = 10 }
+    "scheduled"            = { max_attempts = 3, min_backoff = "10s", max_dispatches_per_second = 10, max_concurrent_dispatches = 10 }
+    "workflow"             = { max_attempts = 3, min_backoff = "2s", max_dispatches_per_second = 25, max_concurrent_dispatches = 25 }
+    "import"               = { max_attempts = 2, min_backoff = "5s", max_dispatches_per_second = 2, max_concurrent_dispatches = 2 }
+    "bulk-contact-actions" = { max_attempts = 2, min_backoff = "5s", max_dispatches_per_second = 2, max_concurrent_dispatches = 2 }
+    "meter"                = { max_attempts = 10, min_backoff = "5s", max_dispatches_per_second = 25, max_concurrent_dispatches = 25 }
   }
 
   cloud_tasks_enqueuer_bindings = {
     for pair in setproduct(keys(local.realtime_task_queues), [
       google_service_account.api.email,
       google_service_account.worker_service.email,
-    ]) : "${pair[0]}-${pair[1]}" => {
+      ]) : "${pair[0]}-${pair[1]}" => {
       queue = pair[0]
       email = pair[1]
     }
@@ -53,7 +53,7 @@ resource "google_cloud_tasks_queue_iam_member" "realtime_enqueuer" {
 
   project  = var.project_id
   location = var.region
-  queue    = google_cloud_tasks_queue.realtime[each.value.queue].name
+  name     = google_cloud_tasks_queue.realtime[each.value.queue].name
   role     = "roles/cloudtasks.enqueuer"
   member   = "serviceAccount:${each.value.email}"
 }
