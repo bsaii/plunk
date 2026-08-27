@@ -4,6 +4,7 @@ import {describe, expect, it} from 'vitest';
 describe('Cloud Tasks worker server', () => {
   it('rejects a task request without a bearer token', async () => {
     process.env.CLOUD_TASKS_AUDIENCE = 'https://worker.example.com';
+    process.env.CLOUD_TASKS_SERVICE_ACCOUNT_EMAIL = 'tasks@example.iam.gserviceaccount.com';
     process.env.JWT_SECRET = 'test';
     process.env.API_URI = 'http://api.test';
     process.env.DASHBOARD_URI = 'http://app.test';
@@ -20,5 +21,14 @@ describe('Cloud Tasks worker server', () => {
     const response = await request(createWorkerServer(async () => undefined)).post('/tasks/email').send({jobId: 'job-1'});
 
     expect(response.status).toBe(401);
+  });
+
+  it('rejects a valid-audience token from another service account', async () => {
+    const {createGoogleTokenVerifier} = await import('../../jobs/worker-server.js');
+    const verifyToken = createGoogleTokenVerifier({
+      verifyIdToken: async () => ({getPayload: () => ({email: 'other@example.iam.gserviceaccount.com'})}),
+    } as never);
+
+    await expect(verifyToken('valid-token')).rejects.toThrow('configured service account');
   });
 });
