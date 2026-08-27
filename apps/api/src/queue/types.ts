@@ -41,6 +41,11 @@ export interface QueueEnqueueOptions {
   delayMs?: number;
   jobId?: string;
   emailPriority?: 1 | 5 | 10;
+  /**
+   * Internal Cloud Tasks rescheduling hop. It is carried in the task envelope
+   * so each task in a delay chain has a unique deterministic task name.
+   */
+  cloudTaskHop?: number;
 }
 
 export interface QueueAdapter {
@@ -57,6 +62,7 @@ export interface CloudTaskEnvelope<T = RealTimeQueueJobData> {
   queue: RealTimeQueueName;
   data?: T;
   notBefore: number;
+  hop: number;
 }
 
 export function nextCloudTaskSchedule(delayMs: number, now = Date.now()): {scheduleAt: number; notBefore: number} {
