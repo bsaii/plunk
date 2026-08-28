@@ -3,13 +3,23 @@ import type {RedisOptions} from 'ioredis';
 
 import {REDIS_URL} from '../app/constants.js';
 
-export const redis = new Redis(REDIS_URL + '?family=0');
+/**
+ * Forces IPv4 (`family: 4`, ioredis's own default — made explicit here so it can't
+ * regress). Providers like Aiven publish both A and AAAA records for their `rediss:`
+ * endpoints; Node's Happy Eyeballs dual-stack fallback only applies to plain
+ * `net.connect()`, not `tls.connect()`, so a TLSSocket that resolves to an AAAA record
+ * on a network without IPv6 egress (e.g. Cloud Run's default networking) just hangs
+ * until the OS gives up, surfacing as `connect ETIMEDOUT` minutes later instead of a
+ * fast failure.
+ */
+export const redis = new Redis(REDIS_URL, {family: 4});
 
 /**
  * Builds ioredis connection options for BullMQ (Queue/Worker), which accept a
  * plain options object rather than a URL string. Preserves the `rediss:` TLS
  * scheme, which is otherwise silently dropped and causes the Redis server to
- * reset the connection (ECONNRESET) when the provider requires TLS.
+ * reset the connection (ECONNRESET) when the provider requires TLS. Also forces
+ * IPv4 — see the comment on `redis` above for why.
  */
 export function getBullMqRedisOptions(url: string): RedisOptions {
   const parsed = new URL(url);
@@ -19,6 +29,7 @@ export function getBullMqRedisOptions(url: string): RedisOptions {
     port: parseInt(parsed.port || '6379', 10),
     password: parsed.password || undefined,
     db: parseInt(parsed.pathname.slice(1) || '0', 10),
+    family: 4,
     ...(parsed.protocol === 'rediss:' ? {tls: {}} : {}),
   };
 }
