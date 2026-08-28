@@ -85,11 +85,15 @@ resource "google_cloud_run_v2_job" "maintenance" {
 
 # --- Cloud Scheduler: one entry per maintenance task ------------------------
 # All UTC — a container's local time defaults to UTC (matches today's BullMQ
-# repeatable-job cadence, which also runs in UTC), verify this against the
-# maintenance-runner image at deploy time if that default is ever overridden.
+# repeatable-job cadence, which also runs in UTC — except domain-verification,
+# see below), verify this against the maintenance-runner image at deploy time
+# if that default is ever overridden.
 locals {
   maintenance_schedules = {
-    "domain-verification"     = "*/5 * * * *"
+    # Deliberately hourly here, diverging from the self-hosted BullMQ
+    # repeatable job's every-5-minutes default (apps/api/src/app.ts) — SES
+    # domain verification doesn't need sub-hour polling in production.
+    "domain-verification"     = "0 * * * *"
     "segment-count"           = "*/5 * * * *"
     "api-request-cleanup"     = "0 3 * * *"
     "idempotency-key-cleanup" = "0 * * * *"
