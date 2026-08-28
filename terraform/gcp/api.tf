@@ -1,16 +1,28 @@
-# plunk-api — min_instance_count defaults to 0 (scale-to-zero) and cpu_idle
-# to true (request-based billing, CPU only allocated while handling a
-# request). Both were previously an always-warm instance with CPU always
-# allocated, kept that way as a correctness crutch: workflow execution used
-# to run synchronously (and, in one path, fire-and-forget) inside HTTP
-# request handlers, which is unsafe once CPU can be throttled after the
-# response is sent. That's fixed now (see WorkflowExecutionService.ts,
-# EventService.ts, WorkflowService.ts, and the requestLogger.ts/idempotency.ts
-# middleware, which now complete their DB writes before the response is
-# flushed rather than after) — so both flags are safe to flip. Cold starts
-# cost a few seconds of Node/Prisma boot latency after an idle period; raise
-# api_min_instance_count back to 1 (terraform.tfvars) if that proves
-# noticeable once this deployment carries real traffic.
+# plunk-api — min_instance_count defaults to 0 (scale-to-zero); cpu_idle is
+# false (CPU always allocated while an instance is warm). This used to be an
+# always-warm instance with CPU always allocated, kept that way as a
+# correctness crutch: workflow execution used to run synchronously (and, in
+# one path, fire-and-forget) inside HTTP request handlers, which is unsafe
+# once CPU can be throttled after the response is sent. That part's fixed
+# (see WorkflowExecutionService.ts, EventService.ts, WorkflowService.ts, and
+# the requestLogger.ts/idempotency.ts middleware, which now complete their DB
+# writes before the response is flushed rather than after), so
+# min_instance_count was safe to drop to 0.
+#
+# cpu_idle stays false, though: apps/api/src/database/redis.ts holds a single
+# long-lived `rediss://` connection reused across requests. With CPU only
+# allocated during request processing, an in-flight TLS handshake/reconnect
+# can get frozen mid-flight the instant a response is sent, and ioredis's
+# connect-timeout timer is wall-clock (not CPU-time) — so by the time the
+# next request thaws the instance, the timer has already "expired" and fires
+# immediately as `connect ETIMEDOUT`, even though nothing was truly stuck.
+# This bit us in production; don't flip this back without giving the Redis
+# client a request-scoped connection lifecycle first.
+#
+# Cold starts cost a few seconds of Node/Prisma boot latency after an idle
+# period; raise api_min_instance_count back to 1 (terraform.tfvars) once this
+# deployment carries enough traffic that an always-warm instance pays for
+# itself.
 # Public internet ingress: Cloudflare proxies api_domain
 # straight to this service (see dns.tf's domain mapping) rather than routing
 # through a GCP load balancer, so this can't be restricted to
@@ -55,9 +67,10 @@ resource "google_cloud_run_v2_service" "api" {
           memory = var.api_memory
         }
         # Explicit rather than relying on the provider default (see the
-        # header comment above) — request-based billing, CPU only allocated
-        # while handling a request.
-        cpu_idle = true
+        # header comment above) — CPU always allocated, not just while
+        # handling a request, so the persistent Redis connection doesn't get
+        # frozen mid-handshake between requests.
+        cpu_idle = false
       }
 
       ports {

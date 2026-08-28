@@ -3,6 +3,13 @@
 # delivery is an authenticated HTTP request and Cloud Run can cold-start it
 # on demand. The legacy Worker Pool remains in worker.tf until the guarded
 # cutover removes it.
+#
+# cpu_idle is false (CPU always allocated while an instance is warm) rather
+# than the provider default — see api.tf's header comment for why: this
+# process also imports apps/api/src/database/redis.ts's long-lived `rediss://`
+# connection, which needs CPU between requests to keep the TLS
+# handshake/reconnect from freezing mid-flight and firing a stale-timer
+# `connect ETIMEDOUT` on the next request.
 resource "google_cloud_run_v2_service" "worker_service" {
   name     = "plunk-worker"
   project  = var.project_id
@@ -31,7 +38,7 @@ resource "google_cloud_run_v2_service" "worker_service" {
           cpu    = var.worker_cpu
           memory = var.worker_memory
         }
-        cpu_idle = true
+        cpu_idle = false
       }
 
       ports {
