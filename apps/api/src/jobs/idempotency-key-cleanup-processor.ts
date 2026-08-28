@@ -5,6 +5,7 @@ import type {RedisOptions} from 'ioredis';
 import signale from 'signale';
 
 import {REDIS_URL} from '../app/constants.js';
+import {getBullMqRedisOptions} from '../database/redis.js';
 import {prisma} from '../database/prisma.js';
 
 /**
@@ -75,7 +76,7 @@ export function createIdempotencyKeyCleanupWorker(): Worker<IdempotencyKeyCleanu
   const redisConnection: RedisOptions = {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
-    ...parseRedisUrl(REDIS_URL),
+    ...getBullMqRedisOptions(REDIS_URL),
   };
 
   const worker = new Worker<IdempotencyKeyCleanupJobData>('idempotency-key-cleanup', processCleanup, {
@@ -96,16 +97,6 @@ export function createIdempotencyKeyCleanupWorker(): Worker<IdempotencyKeyCleanu
   });
 
   return worker;
-}
-
-function parseRedisUrl(url: string): {host: string; port: number; password?: string; db?: number} {
-  const urlObj = new URL(url);
-  return {
-    host: urlObj.hostname,
-    port: parseInt(urlObj.port || '6379', 10),
-    password: urlObj.password || undefined,
-    db: parseInt(urlObj.pathname.slice(1) || '0', 10),
-  };
 }
 
 // If running this file directly (for testing or manual execution)
