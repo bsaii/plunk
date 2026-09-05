@@ -299,8 +299,8 @@ maps reference (10 unique secret IDs in the committed template → 22 grants spl
 api/migrate/worker/maintenance), 4 `time_sleep` IAM-propagation buffers, 8 Cloud Build IAM grants, 2
 Cloud Run services plus 2 `run.invoker` bindings, 2 Cloud Run Jobs (`plunk-migrate`,
 `plunk-maintenance`) plus 1 `google_cloud_run_v2_job_iam_member` (Cloud Scheduler's invoker grant on
-`plunk-maintenance`), 5 `google_cloud_scheduler_job` entries, 1 Cloud Run Worker Pool, and 2 Cloud
-Run Domain Mappings (`dns.tf`). That's around 64 resources total with the template's secret maps
+`plunk-maintenance`), 5 `google_cloud_scheduler_job` entries, and 2 Cloud
+Run Domain Mappings (`dns.tf`). That's around 63 resources total with the template's secret maps
 left as-is — the exact count scales with how many secrets you end up referencing. If `plan` errors
 instead, it's almost
 always one of: a secret from
@@ -382,7 +382,7 @@ with a normal route to `registry.terraform.io`, or `terraform providers lock`) o
 | 3 | `plunk-migrate` | Cloud Run v2 Job | Billed only on manual execution; effectively $0 at rest |
 | 4 | `plunk-maintenance` | Cloud Run v2 Job | Billed only while a Cloud Scheduler-triggered execution runs (5 short-lived runs/day at most, one per schedule); effectively $0 at rest — see "Maintenance jobs" above |
 | 5 | `plunk-maintenance-*` Cloud Scheduler jobs (x5) | `google_cloud_scheduler_job` | Cloud Scheduler has a small free-tier job allowance; well within it at 5 jobs |
-| 6 | `plunk-worker` | Cloud Run v2 service + Cloud Tasks queues | Internal-only, OIDC-gated worker service with `min_instance_count=0` and `cpu_idle=false` (CPU always allocated while warm, same reason as `plunk-api` — it shares the same persistent Redis client). Still far below the Worker Pool's ≈$62–68/month always-on baseline it replaced after the documented Cloud Tasks cutover. Nine Cloud Tasks queues retain retries (including meter's 10 attempts) and split email into transactional, workflow, and campaign rate tiers. The legacy pool remains only while `remove_legacy_worker_pool=false`. |
+| 6 | `plunk-worker` | Cloud Run v2 service + Cloud Tasks queues | Internal-only, OIDC-gated worker service with `min_instance_count=0` and `cpu_idle=false` (CPU always allocated while warm, same reason as `plunk-api` — it shares the same persistent Redis client). Still far below the Worker Pool's ≈$62–68/month always-on baseline it replaced after the documented Cloud Tasks cutover. Nine Cloud Tasks queues retain retries (including meter's 10 attempts) and split email into transactional, workflow, and campaign rate tiers. The legacy Worker Pool has been fully removed after the Cloud Tasks cutover. |
 | 7 | `plunk` Artifact Registry repo | Docker repo | Storage (per GB of stored image layers) + minor egress; no direct charge for the repo itself |
 | 8 | `plunk-api`/`plunk-web` Domain Mappings | `google_cloud_run_domain_mapping` (x2) | No direct GCP charge — the managed certificate is free, same as the old load-balancer approach; Cloudflare's own plan/bandwidth costs apply separately and aren't a GCP Pricing Calculator line item |
 | 9 | Runtime service accounts (x6, incl. `plunk-scheduler-run`) + Cloud Build IAM bindings | `google_service_account`, `google_*_iam_member` | No charge — IAM has no usage-based cost |
