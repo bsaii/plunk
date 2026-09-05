@@ -23,11 +23,6 @@ output "migrate_job_name" {
   value       = google_cloud_run_v2_job.migrate.name
 }
 
-output "worker_pool_name" {
-  description = "Name of the legacy BullMQ Worker Pool, or null after the Cloud Tasks cutover."
-  value       = try(google_cloud_run_v2_worker_pool.worker[0].name, null)
-}
-
 output "maintenance_job_name" {
   description = "Name of the plunk-maintenance Cloud Run Job."
   value       = google_cloud_run_v2_job.maintenance.name

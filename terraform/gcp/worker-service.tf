@@ -1,8 +1,8 @@
 # plunk-worker — internal, scale-to-zero HTTP worker for Cloud Tasks.
 # This is intentionally a Cloud Run Service (not a Job): every Cloud Tasks
 # delivery is an authenticated HTTP request and Cloud Run can cold-start it
-# on demand. The legacy Worker Pool remains in worker.tf until the guarded
-# cutover removes it.
+# on demand. The legacy BullMQ Worker Pool (previously worker.tf) has been
+# fully removed after the Cloud Tasks cutover.
 #
 # cpu_idle is false (CPU always allocated while an instance is warm) rather
 # than the provider default — see api.tf's header comment for why: this
