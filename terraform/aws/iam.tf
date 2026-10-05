@@ -1,5 +1,6 @@
 # Runtime IAM identity Plunk uses to upload objects to the uploads bucket.
-# Kept separate from the SES IAM user (managed outside Terraform today) so
+# Kept separate from the SES IAM user (identity managed outside Terraform;
+# supplemental configuration-set permission in ses-permission.tf) so
 # that compromised storage credentials can't send email or touch SES
 # identities, and vice versa.
 #
