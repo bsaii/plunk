@@ -52,6 +52,15 @@ resource "google_service_account_iam_member" "cloud_tasks_service_agent_token_cr
   member             = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-cloudtasks.iam.gserviceaccount.com"
 }
 
+# Creating an authenticated HTTP task requires the caller to act as the
+# task's OIDC service account, in addition to cloudtasks.tasks.create on
+# the queue. Scope this grant to the dedicated worker invoker identity.
+resource "google_service_account_iam_member" "api_acts_as_cloud_tasks_invoker" {
+  service_account_id = google_service_account.cloud_tasks_invoker.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.api.email}"
+}
+
 resource "google_service_account_iam_member" "cloud_build_acts_as_worker_service" {
   service_account_id = google_service_account.worker_service.name
   role               = "roles/iam.serviceAccountUser"
