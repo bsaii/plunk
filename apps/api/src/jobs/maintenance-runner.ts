@@ -11,19 +11,20 @@
  */
 
 import signale from 'signale';
+import {Redis} from 'ioredis';
 
-import {runApiRequestCleanupJob} from './api-request-cleanup-processor.js';
-import {runDomainVerificationJob} from './domain-verification.js';
-import {runEmailBodyCleanupJob} from './email-body-cleanup-processor.js';
-import {runIdempotencyKeyCleanupJob} from './idempotency-key-cleanup-processor.js';
-import {runSegmentCountJob} from './segment-count-processor.js';
+import {REDIS_URL} from '../app/constants.js';
+import {runWithMaintenanceLock} from './maintenance-lock.js';
 
+// Load only the selected processor, after acquiring its lease. In particular,
+// cleanup-only runs do not need the segment processor's BullMQ queue instances.
 const TASKS = {
-  'domain-verification': runDomainVerificationJob,
-  'segment-count': runSegmentCountJob,
-  'api-request-cleanup': runApiRequestCleanupJob,
-  'idempotency-key-cleanup': runIdempotencyKeyCleanupJob,
-  'email-body-cleanup': runEmailBodyCleanupJob,
+  'domain-verification': async () => (await import('./domain-verification.js')).runDomainVerificationJob(),
+  'segment-count': async () => (await import('./segment-count-processor.js')).runSegmentCountJob(),
+  'api-request-cleanup': async () => (await import('./api-request-cleanup-processor.js')).runApiRequestCleanupJob(),
+  'idempotency-key-cleanup': async () =>
+    (await import('./idempotency-key-cleanup-processor.js')).runIdempotencyKeyCleanupJob(),
+  'email-body-cleanup': async () => (await import('./email-body-cleanup-processor.js')).runEmailBodyCleanupJob(),
 } as const satisfies Record<string, () => Promise<unknown>>;
 
 type TaskName = keyof typeof TASKS;
@@ -37,7 +38,7 @@ function parseTaskName(): string | undefined {
 }
 
 function isTaskName(name: string | undefined): name is TaskName {
-  return name !== undefined && name in TASKS;
+  return name !== undefined && Object.hasOwn(TASKS, name);
 }
 
 async function main() {
@@ -50,9 +51,25 @@ async function main() {
     process.exit(1);
   }
 
-  signale.info(`[MAINTENANCE-RUNNER] Running task "${task}"...`);
-  await TASKS[task]();
-  signale.success(`[MAINTENANCE-RUNNER] Task "${task}" completed successfully`);
+  // Fail closed if Redis cannot grant the lease. Keep lock commands bounded
+  // independently of the legacy application Redis client's retry policy.
+  const lockRedis = new Redis(REDIS_URL, {
+    family: 4,
+    lazyConnect: true,
+    connectTimeout: 10000,
+    commandTimeout: 10000,
+    enableOfflineQueue: false,
+    maxRetriesPerRequest: 1,
+    retryStrategy: () => null,
+  });
+  lockRedis.on('error', error => signale.error('[MAINTENANCE-RUNNER] Lock Redis error:', error));
+
+  try {
+    await lockRedis.connect();
+    await runWithMaintenanceLock(lockRedis, task, TASKS[task]);
+  } finally {
+    lockRedis.disconnect();
+  }
 }
 
 main()

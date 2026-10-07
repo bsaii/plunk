@@ -285,12 +285,16 @@ export class SegmentService {
   }
 
   /**
-   * Refresh member counts for all segments in a project
+   * Refresh member counts, optionally excluding segments already recomputed by
+   * the membership sweep. Other callers retain the all-segments behavior.
    * Should be called by a background job periodically
    */
-  public static async refreshAllMemberCounts(projectId: string): Promise<void> {
+  public static async refreshAllMemberCounts(
+    projectId: string,
+    options: {untrackedOnly?: boolean} = {},
+  ): Promise<void> {
     const segments = await prisma.segment.findMany({
-      where: {projectId},
+      where: {projectId, ...(options.untrackedOnly ? {trackMembership: false} : {})},
       select: {id: true, type: true, condition: true},
     });
 

@@ -64,7 +64,8 @@ async function processProjectSegments(projectId: string, projectName?: string): 
   // Process non-tracked segments with count-only update (lightweight)
   if (nonTrackedSegments.length > 0) {
     try {
-      await SegmentService.refreshAllMemberCounts(projectId);
+      // Tracked segments already updated their counts during computeMembership.
+      await SegmentService.refreshAllMemberCounts(projectId, {untrackedOnly: true});
     } catch (error) {
       signale.error(`[SEGMENT-COUNT-WORKER] Failed to update counts for non-tracked segments:`, error);
     }
@@ -83,9 +84,9 @@ export async function runSegmentCountJob(projectId?: string): Promise<void> {
     return;
   }
 
-  // Process all active projects
+  // Avoid a segment query (and batch delays) for projects with no segments.
   const projects = await prisma.project.findMany({
-    where: {disabled: false},
+    where: {disabled: false, segments: {some: {}}},
     select: {id: true, name: true},
   });
 
