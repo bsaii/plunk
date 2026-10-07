@@ -75,6 +75,10 @@ resource "google_cloud_run_v2_job" "maintenance" {
   lifecycle {
     ignore_changes = [
       template[0].template[0].containers[0].image,
+      # gcloud's image deployment also records its client metadata. A schedule
+      # change must not update the Job merely to erase that deployment metadata.
+      client,
+      client_version,
     ]
   }
 
@@ -93,8 +97,10 @@ locals {
     # Deliberately hourly here, diverging from the self-hosted BullMQ
     # repeatable job's every-5-minutes default (apps/api/src/app.ts) — SES
     # domain verification doesn't need sub-hour polling in production.
-    "domain-verification"     = "0 * * * *"
-    "segment-count"           = "*/5 * * * *"
+    "domain-verification" = "0 * * * *"
+    # Membership events (and workflows triggered by them) now have up to
+    # 15 minutes of polling latency. See docs/maintenance-cost-rollout.md.
+    "segment-count"           = "*/15 * * * *"
     "api-request-cleanup"     = "0 3 * * *"
     "idempotency-key-cleanup" = "0 * * * *"
     "email-body-cleanup"      = "0 4 * * *"

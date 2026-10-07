@@ -1,0 +1,25 @@
+name: Maintenance checks
+
+on:
+  pull_request:
+    branches: [staging, production]
+    paths:
+      - 'apps/api/src/jobs/**'
+      - 'apps/api/src/services/SegmentService.ts'
+      - 'vitest.maintenance.config.ts'
+      - 'terraform/gcp/maintenance.tf'
+      - '.github/workflows/maintenance-checks.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  maintenance-unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node .yarn/releases/yarn-4.9.1.cjs workspaces focus api plunk
+      - run: node .yarn/releases/yarn-4.9.1.cjs vitest run --config vitest.maintenance.config.ts
