@@ -108,12 +108,13 @@ locals {
     # Upstream registers these three as BullMQ repeatable jobs every 2-5 minutes;
     # here they are deliberately coarser to keep Cloud Run Job executions down
     # (see docs/maintenance-cost-rollout.md). Snooze windows are weeks to years,
-    # so hourly (offset from the other hourly tasks) is plenty.
-    "snooze-sweep" = "30 * * * *"
-    # Campaign engagement counters lag by up to 15 minutes instead of 2.
-    "campaign-stats-sweep" = "*/15 * * * *"
+    # so once a day is plenty.
+    "snooze-sweep" = "30 5 * * *"
+    # Campaign engagement counters lag by up to 6 hours instead of 2 minutes. They are
+    # recounted from the email rows, so nothing is lost; tighten once campaigns are active.
+    "campaign-stats-sweep" = "15 */6 * * *"
     # Safety net only: re-queues scheduled emails whose own Cloud Task was lost.
-    "scheduled-email-sweep" = "*/15 * * * *"
+    "scheduled-email-sweep" = "45 * * * *"
   }
 }
 

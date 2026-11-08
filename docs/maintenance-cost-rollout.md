@@ -125,13 +125,13 @@ upstream's:
 
 | Task | Upstream cadence | Here | Effect of the coarser cadence |
 | --- | --- | --- | --- |
-| `snooze-sweep` | every 5 min | hourly (`:30`) | A snoozed contact resubscribes up to an hour late; windows are weeks to years. |
-| `campaign-stats-sweep` | every 2 min | every 15 min | Campaign opens/clicks counters lag up to 15 minutes. |
-| `scheduled-email-sweep` | every 5 min | every 15 min | Only a safety net for scheduled emails whose Cloud Task was lost. |
+| `snooze-sweep` | every 5 min | daily (`05:30`) | A snoozed contact resubscribes up to a day late; windows are weeks to years. |
+| `campaign-stats-sweep` | every 2 min | every 6 hours (`:15`) | Campaign opens/clicks counters lag up to 6 hours (recounted from email rows, so nothing is lost). Tighten once campaigns are active. |
+| `scheduled-email-sweep` | every 5 min | hourly (`:45`) | Only a safety net: a scheduled email whose Cloud Task was lost goes out up to about an hour late. |
 
 Under the same one-minute-per-run assumption as the cost model below, these add
-about 6,480 executions per 30 days (roughly $7.4 compute plus about $0.3 for
-three Scheduler definitions). Tighten a schedule in `terraform/gcp/maintenance.tf`
+about 870 executions per 30 days (roughly $1.0 compute plus about $0.3 for
+three Scheduler definitions, about $1.3 in total). Tighten a schedule in `terraform/gcp/maintenance.tf`
 if the lag matters more than the cost.
 
 The upstream card-verification sweep is intentionally not scheduled here: it

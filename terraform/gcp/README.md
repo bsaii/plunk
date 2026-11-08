@@ -69,9 +69,9 @@ loud instead of silently running the wrong sweep. All 8 schedules run in UTC:
 | `api-request-cleanup` | `0 3 * * *` (daily at 03:00) |
 | `idempotency-key-cleanup` | `0 * * * *` (hourly) |
 | `email-body-cleanup` | `0 4 * * *` (daily at 04:00) |
-| `snooze-sweep` | `30 * * * *` (hourly, at :30) |
-| `campaign-stats-sweep` | `*/15 * * * *` (every 15 minutes) |
-| `scheduled-email-sweep` | `*/15 * * * *` (every 15 minutes) |
+| `snooze-sweep` | `30 5 * * *` (daily at 05:30) |
+| `campaign-stats-sweep` | `15 */6 * * *` (every 6 hours, at :15) |
+| `scheduled-email-sweep` | `45 * * * *` (hourly, at :45) |
 
 This is the GCP-deployment equivalent of the same sweeps that self-hosted deployments still run
 as BullMQ in-process repeatable jobs (`app.ts`, registered on boot) — the `QUEUE_BACKEND` env var
