@@ -2,26 +2,26 @@
   "pages": {
     "unsubscribe": {
       "title": "Wypisz się",
-      "description": "Przykro nam, że odchodzisz. Czy na pewno chcesz wypisać {email} z otrzymywania wiadomości?",
+      "description": "Czy chcesz przestać otrzymywać wiadomości od nadawcy {projectName} na adres {email}?",
       "button": "Wypisz się",
       "buttonLoading": "Wypisywanie...",
       "managePreferences": "Zarządzaj preferencjami zamiast tego",
       "successTitle": "Wypisano",
-      "successDescription": "{email} został wypisany. Nie będziesz już otrzymywać od nas wiadomości.",
+      "successDescription": "Adres {email} nie będzie już otrzymywać wiadomości od nadawcy {projectName}.",
       "changedMind": "Zmieniłeś(-aś) zdanie?",
       "subscribeAgain": "Zapisz się ponownie"
     },
     "subscribe": {
       "title": "Zapisz się na aktualizacje",
-      "description": "Czy chcesz zapisać {email} do otrzymywania wiadomości?",
+      "description": "Czy chcesz otrzymywać wiadomości od nadawcy {projectName} na adres {email}?",
       "button": "Zapisz się",
       "buttonLoading": "Zapisywanie...",
       "successTitle": "Zapisano!",
-      "successDescription": "{email} jest teraz zapisany do otrzymywania od nas wiadomości."
+      "successDescription": "Adres {email} będzie teraz otrzymywać wiadomości od nadawcy {projectName}."
     },
     "manage": {
       "title": "Zarządzaj preferencjami",
-      "description": "Zarządzaj preferencjami e-mail dla adresu {email}",
+      "description": "Zarządzaj wiadomościami, które nadawca {projectName} wysyła na adres {email}.",
       "subscriptionLabel": "Subskrypcja e-mail",
       "subscribedStatus": "Obecnie jesteś zapisany do otrzymywania wiadomości",
       "unsubscribedStatus": "Obecnie jesteś wypisany z otrzymywania wiadomości",
@@ -31,9 +31,26 @@
       "subscribeToEmails": "Zapisz się na e-maile",
       "disclaimer": "Ta strona pozwala zarządzać preferencjami e-mail. Status subskrypcji jest aktualizowany w czasie rzeczywistym."
     },
+    "snooze": {
+      "cta": "Zamiast tego wstrzymaj",
+      "prompt": "Na jak długo wstrzymać wysyłkę e-maili?",
+      "duration_2_weeks": "2 tygodnie",
+      "duration_1_month": "1 miesiąc",
+      "duration_6_months": "6 miesięcy",
+      "duration_1_year": "1 rok",
+      "buttonLoading": "Wstrzymywanie...",
+      "cancel": "Anuluj",
+      "successTitle": "E-maile zostały wstrzymane",
+      "successDescription": "Adres {email} nie będzie otrzymywać wiadomości od nadawcy {projectName} do {date}. Potem wysyłka zostanie wznowiona automatycznie.",
+      "status": "Wstrzymane do {date}",
+      "resume": "Wznów teraz"
+    },
     "common": {
       "loading": "Ładowanie...",
-      "error": "Błąd"
+      "error": "Błąd",
+      "loadFailed": "Nie udało się wczytać preferencji e-mail. Sprawdź link i spróbuj ponownie.",
+      "actionFailed": "Coś poszło nie tak. Spróbuj ponownie.",
+      "sentWith": "Wysłano przez {provider}"
     }
   },
   "email": {

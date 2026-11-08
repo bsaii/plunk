@@ -42,6 +42,9 @@ export async function runEmailBodyCleanupJob(): Promise<{cleared: number}> {
           SELECT "id" FROM "emails"
           WHERE "createdAt" < ${cutoffDate}
             AND "body" <> ''
+            -- A scheduled email still has to be sent with its body. The scheduling horizon is
+            -- far shorter than the retention window, so this only guards that invariant.
+            AND "status" <> 'SCHEDULED'
           ORDER BY "createdAt"
           LIMIT ${BATCH_SIZE}
         )

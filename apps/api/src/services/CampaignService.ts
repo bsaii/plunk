@@ -1,10 +1,20 @@
-import type {Campaign, Contact, Prisma} from '@plunk/db';
-import {CampaignAudienceType, CampaignStatus, EmailSourceType, EmailStatus, TemplateType} from '@plunk/db';
-import type {CreateCampaignData, FilterCondition, PaginatedResponse, UpdateCampaignData} from '@plunk/types';
+import type {Campaign, Contact} from '@plunk/db';
+import {CampaignAudienceType, CampaignStatus, EmailSourceType, EmailStatus, Prisma, TemplateType} from '@plunk/db';
+import {compileTemplate} from '@plunk/shared';
+import type {
+  CampaignListResponse,
+  CampaignRecipient,
+  CampaignRecipientType,
+  CreateCampaignData,
+  CursorPaginatedResponse,
+  FilterCondition,
+  UpdateCampaignData,
+} from '@plunk/types';
 import {fromPrismaJson, toPrismaJson} from '@plunk/types';
 import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
+import {redis} from '../database/redis.js';
 import {HttpException} from '../exceptions/index.js';
 import type {ListSort} from '../utils/listSort.js';
 import {buildEmailFieldsUpdate} from '../utils/modelUpdate.js';
@@ -16,10 +26,25 @@ import {EmailService} from './EmailService.js';
 import {NtfyService} from './NtfyService.js';
 import {QueueService} from './QueueService.js';
 import {SegmentService} from './SegmentService.js';
+import {Keys} from './keys.js';
 import {DASHBOARD_URI, STRIPE_ENABLED} from '../app/constants.js';
 import {sendRawEmail} from './SESService.js';
 
 const BATCH_SIZE = 500; // Number of emails to process per batch (increased for better performance)
+
+/**
+ * Statuses a campaign may be archived from.
+ *
+ * SCHEDULED and SENDING are excluded deliberately: archiving hides a campaign from the
+ * default list, and both of those still need the operator's attention -- one is about to
+ * send, the other is mid-flight -- so hiding them would let a campaign change state, and
+ * potentially fail, out of sight. Restoring is unrestricted; it only ever reveals.
+ */
+const ARCHIVABLE_STATUSES: readonly CampaignStatus[] = [
+  CampaignStatus.DRAFT,
+  CampaignStatus.SENT,
+  CampaignStatus.CANCELLED,
+];
 
 export class CampaignService {
   /**
@@ -182,23 +207,37 @@ export class CampaignService {
   }
 
   /**
-   * List campaigns for a project
+   * List campaigns for a project.
+   *
+   * Scoped to unarchived campaigns unless `archived` is explicitly true. This default is
+   * what every caller wants -- the dashboard list, and the "copy from a previous campaign"
+   * picker, which should not offer something the user has filed away -- so archiving is
+   * enforced here rather than left to each call site to remember.
    */
   public static async list(
     projectId: string,
     options: {
       status?: CampaignStatus;
       search?: string;
+      archived?: boolean;
       page?: number;
       pageSize?: number;
       sort?: ListSort;
     } = {},
-  ): Promise<PaginatedResponse<Campaign>> {
-    const {status, search, page = 1, pageSize = 20, sort = {field: 'createdAt', direction: 'desc'}} = options;
+  ): Promise<CampaignListResponse> {
+    const {
+      status,
+      search,
+      archived = false,
+      page = 1,
+      pageSize = 20,
+      sort = {field: 'createdAt', direction: 'desc'},
+    } = options;
     const skip = (page - 1) * pageSize;
 
     const where: Prisma.CampaignWhereInput = {
       projectId,
+      archived,
       ...(status ? {status} : {}),
       ...(search
         ? {
@@ -211,7 +250,7 @@ export class CampaignService {
         : {}),
     };
 
-    const [campaigns, total] = await Promise.all([
+    const [campaigns, total, archivedTotal] = await Promise.all([
       prisma.campaign.findMany({
         where,
         include: {
@@ -222,6 +261,11 @@ export class CampaignService {
         take: pageSize,
       }),
       prisma.campaign.count({where}),
+      // How many archived campaigns the project has, ignoring the page, the search and the
+      // status filter -- the list only offers its Archived toggle once this is non-zero, so
+      // it has to be an unfiltered figure. Skipped entirely when already listing the archive,
+      // where `total` is the same number. Covered by the (projectId, archived) index prefix.
+      archived ? Promise.resolve(null) : prisma.campaign.count({where: {projectId, archived: true}}),
     ]);
 
     return {
@@ -230,7 +274,44 @@ export class CampaignService {
       page,
       pageSize,
       totalPages: Math.ceil(total / pageSize),
+      archivedCount: archivedTotal ?? total,
     };
+  }
+
+  /**
+   * Archive or restore a campaign.
+   *
+   * Archiving only affects whether the campaign shows up in the default list. It leaves the
+   * status, the materialized counters, the emails and every analytics figure untouched, and
+   * `get()` deliberately still returns archived campaigns so a bookmarked link keeps working.
+   */
+  public static async setArchived(projectId: string, campaignId: string, archived: boolean): Promise<Campaign> {
+    const campaign = await prisma.campaign.findFirst({
+      where: {id: campaignId, projectId},
+      select: {id: true, status: true, archived: true},
+    });
+
+    if (!campaign) {
+      throw new HttpException(404, 'Campaign not found');
+    }
+
+    if (archived && !ARCHIVABLE_STATUSES.includes(campaign.status)) {
+      throw new HttpException(
+        400,
+        `Can only archive draft, sent or cancelled campaigns. This one is ${campaign.status.toLowerCase()}.`,
+      );
+    }
+
+    // Already in the requested state: return it rather than burning a write. Makes the
+    // endpoint idempotent, which matters for the list's undo affordance.
+    if (campaign.archived === archived) {
+      return this.get(projectId, campaignId);
+    }
+
+    return prisma.campaign.update({
+      where: {id: campaignId},
+      data: {archived},
+    });
   }
 
   /**
@@ -267,8 +348,9 @@ export class CampaignService {
    * Apply a bulk operation to multiple campaigns at once.
    *
    * The payload is intentionally open-ended (a single endpoint) so future bulk
-   * operations can stack on the same operation. For now the only supported mode
-   * is `delete: true` (bulk delete).
+   * operations can stack on the same operation. Two modes are supported, and exactly
+   * one may be used per request: `delete: true` (bulk delete) and
+   * `archived: true | false` (bulk archive / restore).
    *
    * Atomicity: every selected campaign must belong to the requesting project AND
    * every one of them must be a DRAFT. Both checks plus the `deleteMany` are
@@ -285,9 +367,15 @@ export class CampaignService {
    */
   public static async bulkUpdate(
     projectId: string,
-    options: {ids: string[]; delete?: boolean},
+    options: {ids: string[]; delete?: boolean; archived?: boolean},
   ): Promise<{deleted?: number; updated?: number}> {
-    const {ids, delete: shouldDelete} = options;
+    const {ids, delete: shouldDelete, archived} = options;
+
+    // The two modes mean opposite things for the same selection, so refuse rather than
+    // silently letting one win.
+    if (shouldDelete && archived !== undefined) {
+      throw new HttpException(400, 'Cannot delete and archive in the same request');
+    }
 
     // Dedup defensively — the schema permits the same id twice and we don't
     // want duplicates inflating the ownership / row counts below.
@@ -332,8 +420,47 @@ export class CampaignService {
       });
     }
 
-    // No-op shape for forward-compat: when other bulk modes ship they'll branch
-    // off here. Returning {updated: 0} keeps the response shape stable.
+    if (archived !== undefined) {
+      return prisma.$transaction(async tx => {
+        // 1. Ownership / project-scope check, exactly as the delete branch does. Cross-project
+        //    leaks are the main thing this endpoint must defend against.
+        const owned = await tx.campaign.findMany({
+          where: {id: {in: uniqueIds}, projectId},
+          select: {id: true, status: true},
+        });
+
+        if (owned.length !== uniqueIds.length) {
+          throw new HttpException(404, 'One or more campaigns not found in this project');
+        }
+
+        // 2. Archiving a SCHEDULED or SENDING campaign would hide something still in flight,
+        //    so reject the whole batch if any selected campaign is not archivable rather than
+        //    quietly skipping it. Restoring has no such constraint -- it only ever reveals.
+        if (archived) {
+          const notArchivable = owned.filter(c => !ARCHIVABLE_STATUSES.includes(c.status));
+
+          if (notArchivable.length > 0) {
+            const count = notArchivable.length;
+            throw new HttpException(
+              400,
+              `Can only archive draft, sent or cancelled campaigns: ${count} of the selected campaign${
+                count === 1 ? ' is' : 's are'
+              } scheduled or sending.`,
+            );
+          }
+        }
+
+        const result = await tx.campaign.updateMany({
+          where: {id: {in: uniqueIds}, projectId},
+          data: {archived},
+        });
+
+        return {updated: result.count};
+      });
+    }
+
+    // No mode supplied. Returning {updated: 0} keeps the response shape stable for a caller
+    // that sends only `ids`.
     return {updated: 0};
   }
 
@@ -365,6 +492,8 @@ export class CampaignService {
         openedCount: 0,
         clickedCount: 0,
         bouncedCount: 0,
+        complainedCount: 0,
+        unsubscribedCount: 0,
       },
     });
 
@@ -542,6 +671,11 @@ export class CampaignService {
     // Get batch of recipients using cursor-based pagination
     const {contacts, nextCursor, hasMore} = await this.getRecipientsCursor(campaign.projectId, campaign, limit, cursor);
 
+    // Parse the Liquid templates once per batch rather than once per recipient. The
+    // subject and body are identical for every contact, only the variables differ.
+    const subjectTemplate = compileTemplate(campaign.subject);
+    const bodyTemplate = compileTemplate(campaign.body);
+
     // Queue emails for each contact
     for (const contact of contacts) {
       try {
@@ -558,17 +692,8 @@ export class CampaignService {
           manageUrl: `${DASHBOARD_URI}/manage/${contact.id}`,
         };
 
-        const renderedSubject = EmailService.format({
-          subject: campaign.subject,
-          body: '',
-          data: variables,
-        }).subject;
-
-        const renderedBody = EmailService.format({
-          subject: '',
-          body: campaign.body,
-          data: variables,
-        }).body;
+        const renderedSubject = subjectTemplate.render(variables);
+        const renderedBody = bodyTemplate.render(variables);
 
         await EmailService.sendCampaignEmail({
           projectId: campaign.projectId,
@@ -611,6 +736,195 @@ export class CampaignService {
       });
 
       await this.finalizeIfDone(campaignId);
+    }
+  }
+
+  /**
+   * Emails sent so far in an in-flight campaign, held in Redis.
+   *
+   * Not a column increment: the send path runs once per recipient at a concurrency
+   * derived from the SES quota, and every one of those writes would serialize on
+   * the same campaign row. Measured on one row, throughput falls as concurrency
+   * rises (~4.8k/s at 10 clients down to ~3.5k/s at 50) while the same load spread
+   * over distinct rows scales up, and each write leaves a dead tuple on a table the
+   * dashboard reads constantly. Redis INCR has neither problem.
+   *
+   * `Campaign.sentCount` stays authoritative and is written once, by
+   * `reconcileStats` when the send finalizes; this key is only the live delta on
+   * top of it and is dropped at that point.
+   */
+  private static readonly SENT_PROGRESS_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+  /**
+   * Add one to a campaign's live sent progress.
+   *
+   * Callers must only invoke this when they are the ones that stamped
+   * `Email.sentAt`, so a retried job that finds the email already sent does not
+   * count it twice.
+   *
+   * Never allowed to fail the send that triggered it: the message is already away
+   * by the time this runs, and throwing here would retry the job and send it again.
+   * A lost increment is corrected by `reconcileStats` at finalization.
+   */
+  public static async countCampaignSent(campaignId: string): Promise<void> {
+    try {
+      const key = Keys.Campaign.sentProgress(campaignId);
+      await redis.multi().incr(key).expire(key, this.SENT_PROGRESS_TTL_SECONDS).exec();
+    } catch (error) {
+      signale.warn(`[CAMPAIGN] Failed to record sent progress for campaign ${campaignId}:`, error);
+    }
+  }
+
+  /**
+   * Read the live sent progress for an in-flight campaign.
+   *
+   * Returns 0 when Redis is unavailable rather than throwing: a missing progress
+   * number should render the campaign as "nothing sent yet", not fail the stats
+   * endpoint outright.
+   */
+  private static async readSentProgress(campaignId: string): Promise<number> {
+    try {
+      const value = await redis.get(Keys.Campaign.sentProgress(campaignId));
+      return value ? Number.parseInt(value, 10) || 0 : 0;
+    } catch (error) {
+      signale.warn(`[CAMPAIGN] Failed to read sent progress for campaign ${campaignId}:`, error);
+      return 0;
+    }
+  }
+
+  /**
+   * Note that a campaign's counters are behind its email rows.
+   *
+   * Called from the SES event webhook, which runs once per recipient per event --
+   * the same shape of load as the send path, and the reason `sentCount` is not a
+   * column increment either. A campaign row updated on every delivery would
+   * serialize thousands of writes on one row and leave a dead tuple behind each,
+   * on the table the dashboard reads constantly. SADD costs nothing and moves the
+   * arithmetic to a sweep that pays for it once per interval instead.
+   *
+   * Never allowed to fail the webhook: the event has already been applied to the
+   * email row by the time this runs, and throwing here would return a 5xx that has
+   * SES redeliver an event that was in fact recorded. A lost mark means the
+   * counters stay behind until the next event on that campaign, which is a stale
+   * number rather than a wrong one.
+   */
+  public static async markStatsDirty(campaignId: string): Promise<void> {
+    try {
+      await redis.sadd(Keys.Campaign.statsDirty(), campaignId);
+    } catch (error) {
+      signale.warn(`[CAMPAIGN] Failed to mark stats dirty for campaign ${campaignId}:`, error);
+    }
+  }
+
+  /**
+   * Take up to `limit` campaigns off the dirty set and reconcile each one.
+   *
+   * SPOP removes the ids before the recount runs, so a campaign that draws another
+   * event mid-sweep is re-added and picked up next time rather than being missed.
+   * The reverse -- a crash between the pop and the update -- leaves that campaign
+   * stale until its next event, which is the same failure the finalization
+   * reconcile already tolerates.
+   *
+   * Returns the number of campaigns reconciled so the caller can log a sweep that
+   * found nothing differently from one that drained a backlog.
+   */
+  public static async sweepDirtyStats(limit: number): Promise<number> {
+    let campaignIds: string[];
+
+    try {
+      campaignIds = await redis.spop(Keys.Campaign.statsDirty(), limit);
+    } catch (error) {
+      signale.warn('[CAMPAIGN] Failed to read the dirty stats set:', error);
+      return 0;
+    }
+
+    let reconciled = 0;
+
+    for (const campaignId of campaignIds) {
+      try {
+        await this.reconcileStats(campaignId);
+        reconciled += 1;
+      } catch (error) {
+        // One campaign that cannot be counted -- deleted mid-sweep, or a statement
+        // timeout on a very large one -- must not strand the rest of the batch.
+        signale.error(`[CAMPAIGN] Failed to reconcile stats for campaign ${campaignId}:`, error);
+      }
+    }
+
+    return reconciled;
+  }
+
+  /**
+   * Recompute a campaign's counters from the emails that carry them.
+   *
+   * This is the only path that writes them. It runs at finalization and then from
+   * the dirty-set sweep as events arrive -- never on read, which is what made the
+   * stats endpoint slow enough to notice.
+   *
+   * One grouped pass over the campaign's emails, so the cost is O(campaign size)
+   * and paid once. `unsubscribedCount` is deliberately absent: it is written together
+   * with `Email.unsubscribedAt`, in one transaction, by
+   * ContactService.recordCampaignUnsubscribe, so it is already exact, and recounting it
+   * here would also count rows the backfill stamped for opt-outs older than that write.
+   *
+   * `foldSentProgress` folds `sentCount` in as well and drops the Redis delta that
+   * tracked it. Only the finalization caller may ask for that: while the send is
+   * still running, the count of rows read here and the delta are moving
+   * independently, so writing the total and deleting the key would drop every send
+   * that landed in between and walk the progress number backwards. Between sends
+   * the two agree, and the send path is the authority on `sentCount` regardless.
+   */
+  public static async reconcileStats(campaignId: string, {foldSentProgress = false} = {}): Promise<void> {
+    const [totals] = await prisma.$queryRaw<
+      {
+        sent: bigint;
+        delivered: bigint;
+        opened: bigint;
+        clicked: bigint;
+        bounced: bigint;
+        complained: bigint;
+      }[]
+    >`
+      SELECT
+        COUNT(*) FILTER (WHERE "sentAt" IS NOT NULL) AS sent,
+        COUNT(*) FILTER (WHERE "deliveredAt" IS NOT NULL) AS delivered,
+        COUNT(*) FILTER (WHERE "openedAt" IS NOT NULL) AS opened,
+        COUNT(*) FILTER (WHERE "clickedAt" IS NOT NULL) AS clicked,
+        COUNT(*) FILTER (WHERE "bouncedAt" IS NOT NULL) AS bounced,
+        COUNT(*) FILTER (WHERE "complainedAt" IS NOT NULL) AS complained
+      FROM "emails"
+      WHERE "campaignId" = ${campaignId}::text
+    `;
+
+    if (!totals) {
+      return;
+    }
+
+    // updateMany, not update: a campaign deleted while its events were still arriving stays in
+    // the dirty set, and `update` would throw P2025 for a row that is legitimately gone. This
+    // no-ops on a missing campaign instead of turning a normal race into a logged error.
+    await prisma.campaign.updateMany({
+      where: {id: campaignId},
+      data: {
+        ...(foldSentProgress ? {sentCount: Number(totals.sent)} : {}),
+        deliveredCount: Number(totals.delivered),
+        openedCount: Number(totals.opened),
+        clickedCount: Number(totals.clicked),
+        bouncedCount: Number(totals.bounced),
+        complainedCount: Number(totals.complained),
+      },
+    });
+
+    if (!foldSentProgress) {
+      return;
+    }
+
+    // The column now carries the full total, so the live delta must go or it would
+    // be counted a second time on top of it.
+    try {
+      await redis.del(Keys.Campaign.sentProgress(campaignId));
+    } catch (error) {
+      signale.warn(`[CAMPAIGN] Failed to clear sent progress for campaign ${campaignId}:`, error);
     }
   }
 
@@ -671,26 +985,105 @@ export class CampaignService {
       data: {status: CampaignStatus.SENT, sentCount},
     });
 
+    // Fold every counter back to what the emails actually say, now that the send is
+    // over, and settle `sentCount` against the live Redis delta. Events that arrive
+    // after this point -- which is most opens and clicks -- are picked up by the
+    // dirty-set sweep instead.
+    await this.reconcileStats(campaignId, {foldSentProgress: true});
+
     signale.success(
       `[CAMPAIGN] Campaign ${campaign.name} finalized: ${sentCount}/${campaign.totalRecipients} emails sent`,
     );
 
-    await NtfyService.notifyCampaignSendCompleted(
-      campaign.name,
-      campaign.project.name,
-      campaign.projectId,
-      sentCount,
-    );
+    await NtfyService.notifyCampaignSendCompleted(campaign.name, campaign.project.name, campaign.projectId, sentCount);
   }
 
   /**
-   * Cancel a campaign
+   * Statuses an email can hold once it is beyond recall.
+   *
+   * SENDING counts: the worker is past its guard and inside the SES call. Everything
+   * from SENT onwards is self-evident. PENDING and FAILED are the only two that mean
+   * nothing left -- with one exception, handled in `hasDepartedEmail`.
    */
-  public static async cancel(projectId: string, campaignId: string): Promise<Campaign> {
+  private static readonly DEPARTED_EMAIL_STATUSES = [
+    EmailStatus.SENDING,
+    EmailStatus.SENT,
+    EmailStatus.DELIVERED,
+    EmailStatus.RECEIVED,
+    EmailStatus.OPENED,
+    EmailStatus.CLICKED,
+    EmailStatus.BOUNCED,
+    EmailStatus.COMPLAINED,
+  ];
+
+  /**
+   * Has any of this campaign's mail actually reached SES?
+   *
+   * Deliberately a `findFirst` and not a count: on a million-recipient campaign the
+   * answer is usually "no", and a count would read every row to say so. Both branches
+   * are probes against the (campaignId, status) index, so the query costs the same
+   * whether the campaign has a thousand rows or a million.
+   *
+   * The second branch is the exception to the status test. The send path's catch
+   * marks an email FAILED without clearing `sentAt`, so an email that SES accepted
+   * before a later step threw is FAILED *and* sent. Testing status alone would read
+   * that as never-sent and delete the only record of a message a recipient received.
+   */
+  private static async hasDepartedEmail(campaignId: string): Promise<boolean> {
+    const departed = await prisma.email.findFirst({
+      where: {
+        campaignId,
+        OR: [
+          {status: {in: this.DEPARTED_EMAIL_STATUSES}},
+          {status: EmailStatus.FAILED, sentAt: {not: null}},
+        ],
+      },
+      select: {id: true},
+    });
+
+    return departed !== null;
+  }
+
+  /**
+   * Cancel a campaign.
+   *
+   * The outcome depends on whether anything actually reached a recipient:
+   *
+   * - Nothing sent yet -> the campaign returns to DRAFT and is editable again.
+   * - At least one email away -> CANCELLED, which is terminal. Part of the audience
+   *   has the mail and no edit can unsend it, so the record stays frozen as proof of
+   *   what those recipients received.
+   *
+   * Note that `Email` rows are a poor proxy for "sent": `processBatch` creates them
+   * PENDING well before the worker hands anything to SES.
+   *
+   * Ordering matters. The status flip to CANCELLED happens first, before anything is
+   * counted, because it is what closes the door: `processBatch` stops the batch chain
+   * on it and the email worker skips every job it already queued. Counting first
+   * would race the workers and could hand back an editable draft while messages were
+   * still going out.
+   *
+   * Returns the campaign plus whether a revert is still in flight. A campaign that
+   * never got as far as creating rows -- a schedule cancelled before its time, which
+   * is the common case -- is reverted here and comes back as a DRAFT. One stopped
+   * mid-send owns up to a row per recipient, far too many to delete in a request, so
+   * it comes back CANCELLED with `revertPending` set and is promoted by the cleanup
+   * worker. Re-running cancel on a campaign already CANCELLED is the repair path for
+   * a cleanup that died: it re-queues the job rather than erroring.
+   */
+  public static async cancel(
+    projectId: string,
+    campaignId: string,
+  ): Promise<{campaign: Campaign; revertPending: boolean}> {
     const campaign = await this.get(projectId, campaignId);
 
-    // Can only cancel scheduled or sending campaigns
-    if (campaign.status !== CampaignStatus.SCHEDULED && campaign.status !== CampaignStatus.SENDING) {
+    const isRepair = campaign.status === CampaignStatus.CANCELLED;
+
+    if (
+      campaign.status !== CampaignStatus.SCHEDULED &&
+      campaign.status !== CampaignStatus.SENDING &&
+      !isRepair
+    ) {
       throw new HttpException(400, 'Can only cancel scheduled or sending campaigns');
     }
 
@@ -699,7 +1092,8 @@ export class CampaignService {
       await QueueService.cancelScheduledCampaign(campaignId);
     }
 
-    // Update status
+    // Stop the send first -- see the ordering note above. Already CANCELLED on the
+    // repair path, but the write is idempotent and keeps the timestamp fresh.
     const cancelledCampaign = await prisma.campaign.update({
       where: {id: campaignId},
       data: {
@@ -712,61 +1106,312 @@ export class CampaignService {
       },
     });
 
-    // Send notification about campaign cancellation
-    await NtfyService.notifyCampaignCancelled(cancelledCampaign.name, cancelledCampaign.project.name, projectId);
+    // Now that no further email can be dispatched, the answer is stable.
+    if (await this.hasDepartedEmail(campaignId)) {
+      if (!isRepair) {
+        await NtfyService.notifyCampaignCancelled(cancelledCampaign.name, cancelledCampaign.project.name, projectId);
+      }
 
-    return cancelledCampaign;
+      return {campaign: cancelledCampaign, revertPending: false};
+    }
+
+    // Nothing left. If the campaign never created any rows there is nothing to clean
+    // up and it can go straight back to draft, which is the path a cancelled schedule
+    // takes.
+    const anyEmail = await prisma.email.findFirst({where: {campaignId}, select: {id: true}});
+
+    if (!anyEmail) {
+      return {campaign: await this.finishRevertToDraft(projectId, campaignId), revertPending: false};
+    }
+
+    await QueueService.queueCampaignCancelCleanup(campaignId, projectId, new Date());
+
+    return {campaign: cancelledCampaign, revertPending: true};
   }
 
   /**
-   * Get campaign statistics
+   * Finish the revert once a cleanup job has cleared the unsent rows.
+   *
+   * Re-checks rather than trusting the decision `cancel` made: the cleanup runs for as
+   * long as the deletion takes, and a worker that was inside its SES call when the
+   * campaign was cancelled can stamp an email in that window. If one did, the
+   * campaign stays CANCELLED and keeps the rows that prove it.
+   *
+   * Returns the status the campaign ended on, for the worker to log.
+   */
+  public static async completeCancelRevert(projectId: string, campaignId: string): Promise<CampaignStatus> {
+    const campaign = await prisma.campaign.findUnique({
+      where: {id: campaignId},
+      select: {status: true},
+    });
+
+    if (!campaign) {
+      // Deleted while the cleanup drained. Nothing to promote, and nothing wrong.
+      return CampaignStatus.CANCELLED;
+    }
+
+    if (campaign.status !== CampaignStatus.CANCELLED) {
+      // Already promoted by an earlier attempt of this job, or moved on by hand.
+      return campaign.status;
+    }
+
+    if (await this.hasDepartedEmail(campaignId)) {
+      signale.warn(
+        `[CAMPAIGN] Campaign ${campaignId} sent an email while its cancellation was being cleaned up, staying cancelled`,
+      );
+      return CampaignStatus.CANCELLED;
+    }
+
+    await this.finishRevertToDraft(projectId, campaignId);
+
+    return CampaignStatus.DRAFT;
+  }
+
+  /**
+   * Put a cancelled campaign back to how a draft looks.
+   *
+   * Not merely a relabel: `startSending` stamps `sentAt` on the campaign before the
+   * first batch runs, and a stale `scheduledFor` would have it render as due in the
+   * past. The counters go back to zero because the emails they described are gone.
+   *
+   * `totalRecipients` is deliberately left alone -- it is the audience estimate the
+   * editor shows, and `send` recomputes it before the next send anyway.
+   */
+  private static async finishRevertToDraft(
+    projectId: string,
+    campaignId: string,
+  ): Promise<Campaign & {project: {name: string}}> {
+    const draftCampaign = await prisma.campaign.update({
+      where: {id: campaignId},
+      data: {
+        status: CampaignStatus.DRAFT,
+        sentAt: null,
+        scheduledFor: null,
+        sentCount: 0,
+        deliveredCount: 0,
+        openedCount: 0,
+        clickedCount: 0,
+        bouncedCount: 0,
+        complainedCount: 0,
+        unsubscribedCount: 0,
+      },
+      include: {
+        project: {
+          select: {name: true},
+        },
+      },
+    });
+
+    // Redis holds the live send progress and a dirty-stats flag for in-flight
+    // campaigns. Neither describes a draft, and a stale progress key would be folded
+    // into `sentCount` by the next `reconcileStats`. Never allowed to fail the
+    // revert: the campaign is already a draft by this point, and both keys are
+    // self-correcting (the progress key expires, the dirty flag reconciles a campaign
+    // whose counters are all zero to zero).
+    try {
+      await redis.del(Keys.Campaign.sentProgress(campaignId));
+      await redis.srem(Keys.Campaign.statsDirty(), campaignId);
+    } catch (error) {
+      signale.warn(`[CAMPAIGN] Failed to clear send progress for reverted campaign ${campaignId}:`, error);
+    }
+
+    // Any deleted rows no longer count toward this month's quota, which is a count of
+    // Email rows rather than a running total -- so the cache is invalidated and
+    // recomputed rather than adjusted.
+    await BillingLimitService.invalidateCache(projectId);
+
+    signale.info(`[CAMPAIGN] Campaign ${campaignId} cancelled before any email was sent, returned to draft`);
+
+    return draftCampaign;
+  }
+
+  /**
+   * Get campaign statistics.
+   *
+   * Reads the counters off the campaign row rather than recomputing them.
+   * `sentCount` is maintained by the send paths and `unsubscribedCount` by
+   * ContactService.unsubscribe; delivered/opened/clicked/bounced/complained are
+   * written by `reconcileStats`, which runs when the send finalizes and then
+   * whenever the sweep finds the campaign in the dirty set -- so they trail an
+   * event by up to the sweep interval. Recomputing here instead would re-derive
+   * numbers that are already correct, at a cost that grows with the campaign --
+   * and, in the case of unsubscribes, with the size of the whole events table,
+   * since no index serves a predicate on Event.name alone. This endpoint is polled
+   * every 15s while a campaign is sending, so it has to stay a single indexed row
+   * lookup.
+   *
+   * Note what this means for a campaign that finalized before the counters were
+   * written by anything: the row is authoritative, so a zero here is reported as a
+   * zero no matter what the emails say. That is what the
+   * 20260824120000_backfill_campaign_engagement_counters migration repairs.
+   *
+   * `this.get` has already fetched the row, so the stats cost no further queries.
    */
   public static async getStats(projectId: string, campaignId: string) {
     const campaign = await this.get(projectId, campaignId);
 
-    // Get email stats from Email table
-    const [sentEmails, deliveredEmails, openedEmails, clickedEmails, bouncedEmails] = await Promise.all([
-      prisma.email.count({
-        where: {campaignId, sentAt: {not: null}},
-      }),
-      prisma.email.count({
-        where: {campaignId, deliveredAt: {not: null}},
-      }),
-      prisma.email.count({
-        where: {campaignId, openedAt: {not: null}},
-      }),
-      prisma.email.count({
-        where: {campaignId, clickedAt: {not: null}},
-      }),
-      prisma.email.count({
-        where: {campaignId, bouncedAt: {not: null}},
-      }),
-    ]);
+    const {
+      totalRecipients,
+      deliveredCount,
+      openedCount,
+      clickedCount,
+      bouncedCount,
+      complainedCount,
+      unsubscribedCount,
+    } = campaign;
 
-    // Update campaign stats
-    await prisma.campaign.update({
-      where: {id: campaignId},
-      data: {
-        sentCount: sentEmails,
-        deliveredCount: deliveredEmails,
-        openedCount: openedEmails,
-        clickedCount: clickedEmails,
-        bouncedCount: bouncedEmails,
-      },
-    });
+    // `sentCount` is only written to the row when the send finalizes, so while a
+    // campaign is in flight the progress lives in Redis. One GET, and only for a
+    // campaign that is actually sending.
+    const sentCount =
+      campaign.status === CampaignStatus.SENDING
+        ? campaign.sentCount + (await this.readSentProgress(campaignId))
+        : campaign.sentCount;
 
     return {
-      totalRecipients: campaign.totalRecipients,
-      sentCount: sentEmails,
-      deliveredCount: deliveredEmails,
-      openedCount: openedEmails,
-      clickedCount: clickedEmails,
-      bouncedCount: bouncedEmails,
-      openRate: sentEmails > 0 ? (openedEmails / sentEmails) * 100 : 0,
-      clickRate: sentEmails > 0 ? (clickedEmails / sentEmails) * 100 : 0,
-      bounceRate: sentEmails > 0 ? (bouncedEmails / sentEmails) * 100 : 0,
-      deliveryRate: sentEmails > 0 ? (deliveredEmails / sentEmails) * 100 : 0,
+      totalRecipients,
+      sentCount,
+      deliveredCount,
+      openedCount,
+      clickedCount,
+      bouncedCount,
+      complainedCount,
+      unsubscribedCount,
+      openRate: sentCount > 0 ? (openedCount / sentCount) * 100 : 0,
+      clickRate: sentCount > 0 ? (clickedCount / sentCount) * 100 : 0,
+      bounceRate: sentCount > 0 ? (bouncedCount / sentCount) * 100 : 0,
+      deliveryRate: sentCount > 0 ? (deliveredCount / sentCount) * 100 : 0,
+      // Every rate on this object divides by sentCount, which is what the API
+      // documents. Complaints in particular must match that convention: the
+      // project-level complaint rate SES enforcement watches is also measured
+      // against emails sent, and two rates for the same thing that disagree are
+      // worse than either.
+      complaintRate: sentCount > 0 ? (complainedCount / sentCount) * 100 : 0,
+      unsubscribeRate: sentCount > 0 ? (unsubscribedCount / sentCount) * 100 : 0,
     };
+  }
+
+  /**
+   * List the recipients a campaign lost to a bounce, a spam complaint or an opt-out.
+   *
+   * Bounces and complaints select on `status`, which is served by the existing (campaignId, status) index, so
+   * finding a campaign's few thousand bounces never reads its million sent rows. That is
+   * only correct because `nextStatus` in the SES webhook makes BOUNCED and COMPLAINED
+   * terminal: before that guard, an Open arriving after a complaint -- the usual order,
+   * given SNS does not sequence its events -- overwrote the status and hid one complaint in
+   * five from exactly this query. Weakening that guard silently under-reports this list, so
+   * it is covered by its own test.
+   *
+   * Opt-outs have no status of their own -- an unsubscribed email is still DELIVERED or
+   * OPENED -- so they select on `unsubscribedAt IS NOT NULL` instead, served by the partial
+   * index `emails_campaignId_unsubscribedAt_idx` (background-index-builder.ts). That index
+   * carries the sort too, so an unsubscribe page is an ordered walk with no sort at all.
+   *
+   * For bounces and complaints, the sort is on the timestamp, which the index does not carry, so each page sorts the
+   * campaign's matching rows. That cost scales with how many recipients a campaign lost,
+   * not with how many it was sent to -- thousands, not millions -- and paging is keyset so
+   * the sorted set shrinks as the reader goes deeper.
+   *
+   * No COUNT(*): the total already lives on the campaign row, written by `reconcileStats`.
+   * Recounting here would be the expensive half of the request and could only ever agree
+   * with the number already on the row.
+   */
+  public static async listRecipients(
+    projectId: string,
+    campaignId: string,
+    type: CampaignRecipientType,
+    {limit = 50, cursor}: {limit?: number; cursor?: string} = {},
+  ): Promise<CursorPaginatedResponse<CampaignRecipient>> {
+    // Scopes the campaign to the caller's project and 404s otherwise, so the raw query
+    // below can key on campaignId alone.
+    const campaign = await this.get(projectId, campaignId);
+
+    const {column, filter, total} = {
+      bounced: {
+        column: Prisma.raw('"bouncedAt"'),
+        filter: Prisma.sql`e."status" = ${EmailStatus.BOUNCED}::"EmailStatus"`,
+        total: campaign.bouncedCount,
+      },
+      complained: {
+        column: Prisma.raw('"complainedAt"'),
+        filter: Prisma.sql`e."status" = ${EmailStatus.COMPLAINED}::"EmailStatus"`,
+        total: campaign.complainedCount,
+      },
+      unsubscribed: {
+        column: Prisma.raw('"unsubscribedAt"'),
+        // Must stay character-for-character the partial index's predicate, or the planner
+        // will not use it.
+        filter: Prisma.sql`e."unsubscribedAt" IS NOT NULL`,
+        total: campaign.unsubscribedCount,
+      },
+    }[type];
+
+    const decoded = this.decodeRecipientCursor(cursor);
+
+    // One row over the page size: the presence of the extra row is what `hasMore` reports,
+    // which costs one index entry instead of a second count query.
+    const rows = await prisma.$queryRaw<{id: string; contactId: string; email: string; occurredAt: Date}[]>`
+      SELECT e."id", e."contactId", c."email", e.${column} AS "occurredAt"
+      FROM "emails" e
+      JOIN "contacts" c ON c."id" = e."contactId"
+      WHERE e."campaignId" = ${campaignId}::text
+        AND ${filter}
+        ${
+          decoded
+            ? Prisma.sql`AND (e.${column}, e."id") < (${decoded.occurredAt}::timestamptz, ${decoded.id}::text)`
+            : Prisma.empty
+        }
+      ORDER BY e.${column} DESC, e."id" DESC
+      LIMIT ${limit + 1}
+    `;
+
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1];
+
+    return {
+      data: page.map(row => ({
+        emailId: row.id,
+        contactId: row.contactId,
+        email: row.email,
+        occurredAt: row.occurredAt.toISOString(),
+      })),
+      cursor: hasMore && last ? this.encodeRecipientCursor(last.occurredAt, last.id) : undefined,
+      hasMore,
+      total,
+    };
+  }
+
+  /**
+   * The keyset a recipient page resumes from, as one opaque string.
+   *
+   * Both halves are needed: timestamps collide freely here, because a bounce storm
+   * stamps thousands of rows within the same millisecond, and a cursor on the timestamp
+   * alone would either skip or repeat every row it collided with.
+   */
+  private static encodeRecipientCursor(occurredAt: Date, id: string): string {
+    return Buffer.from(`${occurredAt.toISOString()}|${id}`).toString('base64url');
+  }
+
+  /**
+   * Returns undefined for anything that is not a cursor this service issued. A caller
+   * that hand-edits one gets the first page, not an error: a malformed cursor is not
+   * worth a 400 on a read that has an obvious correct answer.
+   */
+  private static decodeRecipientCursor(cursor?: string): {occurredAt: Date; id: string} | undefined {
+    if (!cursor) {
+      return undefined;
+    }
+
+    const [timestamp, id] = Buffer.from(cursor, 'base64url').toString('utf8').split('|');
+
+    if (!timestamp || !id) {
+      return undefined;
+    }
+
+    const occurredAt = new Date(timestamp);
+
+    return Number.isNaN(occurredAt.getTime()) ? undefined : {occurredAt, id};
   }
 
   /**
@@ -845,25 +1490,6 @@ export class CampaignService {
   }
 
   /**
-   * Get recipients for a campaign (legacy offset-based, kept for compatibility)
-   */
-  private static async getRecipients(
-    projectId: string,
-    campaign: Campaign,
-    offset: number,
-    limit: number,
-  ): Promise<Contact[]> {
-    const where = await this.buildRecipientWhereAsync(projectId, campaign);
-
-    return prisma.contact.findMany({
-      where,
-      skip: offset,
-      take: limit,
-      orderBy: {createdAt: 'asc'}, // Consistent ordering for batching
-    });
-  }
-
-  /**
    * Get recipients for a campaign using cursor-based pagination
    */
   private static async getRecipientsCursor(
@@ -926,7 +1552,7 @@ export class CampaignService {
         }
 
         // Use the SegmentService to build the where clause from the condition
-        const segmentWhere = await SegmentService.buildConditionClause(condition);
+        const segmentWhere = await SegmentService.buildConditionClause(projectId, condition);
 
         return {
           ...baseWhere,
@@ -969,7 +1595,7 @@ export class CampaignService {
     }
 
     const condition = fromPrismaJson<FilterCondition>(segment.condition);
-    const segmentWhere = await SegmentService.buildConditionClause(condition);
+    const segmentWhere = await SegmentService.buildConditionClause(projectId, condition);
 
     return {
       ...baseWhere,

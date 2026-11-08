@@ -1,3 +1,5 @@
+import {CHANGELOG, formatDay, groupByMonth} from './changelog';
+
 export const MARKDOWN_PAGES: Record<string, string> = {
   index: `# Plunk — The Open-Source Email Platform
 
@@ -139,7 +141,7 @@ Yes. Plunk handles transactional emails — sign-ups, cancellations, plan change
 Yes. Plunk lets you send newsletters and broadcast emails to your full list or any segment.
 
 **What programming languages does Plunk support?**
-Any language capable of HTTP requests. Plunk provides a REST API plus SDKs for Node.js, Python, and more.
+Any language capable of HTTP requests. Plunk provides a REST API that works with any HTTP client, plus SMTP for frameworks that already send mail.
 
 **How much does Plunk cost?**
 Free plan includes 1,000 emails/month. Paid plan is $0.001 per email with no contact limits.
@@ -167,6 +169,8 @@ Includes:
 - Transactional emails
 - Workflow automation
 - Campaign broadcasts
+- Inbound email
+- Email validation
 - Custom domains
 - Click & open tracking
 - Unlimited contacts
@@ -198,8 +202,10 @@ No feature tiers, no add-ons, no surprises.
 | Transactional emails | API and SMTP delivery for receipts, password resets, and event-driven email. |
 | Workflow automation | Event-triggered sequences with delays, conditions, and branching logic. |
 | Campaign broadcasts | Send newsletters and announcements to your full list or a targeted segment. |
+| Inbound email | Receive email on your domain and get every message delivered to your app as a webhook. |
+| Email validation | Catch typos, disposable domains, and missing MX records before you send. |
 | Unlimited contacts | Store as many contacts as you need. Growing your list never costs more. |
-| Full API access | REST API with SDKs for Node.js, Python, and more. |
+| Full API access | REST API and SMTP, usable from any language. |
 | Custom domains | Send from your own domain with DKIM, SPF, and DMARC set up automatically. |
 | Audience segmentation | Dynamic segments built on behavior, attributes, and engagement data. |
 | Analytics & tracking | Opens, clicks, bounces, and unsubscribes. Real data, no guessing. |
@@ -289,9 +295,9 @@ Inbound email lets your application receive emails sent to your Plunk domain. Wh
 ## Capabilities
 
 - **Webhook delivery**: Parsed email payload posted to your endpoint
-- **Attachment handling**: Access attachments programmatically
+- **Security checks**: Spam, virus, SPF, DKIM and DMARC results on every message
 - **Custom addresses**: Route different addresses to different webhooks
-- **Reply detection**: Track email threads automatically
+- **Workflow triggers**: Start an automation from any inbound message
 
 [Back to features](/features) | [Pricing](/pricing)
 `,
@@ -340,6 +346,78 @@ Plunk provides SMTP credentials so you can send emails from any application or f
 
 [Back to features](/features) | [Pricing](/pricing) | [Documentation](https://docs.useplunk.com)
 `,
+
+  'features/mcp': `# MCP Server — Plunk
+
+Connect Plunk to Claude, Cursor, and any Model Context Protocol client. Forty-five tools for transactional email, contacts, segments, campaigns, and workflows.
+
+[Get started free](https://next-app.useplunk.com/auth/signup) | [Documentation](https://docs.useplunk.com/guides/mcp-server)
+
+---
+
+## Setup
+
+The server is published as \`@plunk/mcp\`. You need a secret key (\`sk_…\`) from Settings → API Keys.
+
+\`\`\`bash
+claude mcp add plunk --env PLUNK_API_KEY=sk_your_key -- npx -y @plunk/mcp
+\`\`\`
+
+For Claude Desktop, Cursor, or any other client, add it to your MCP config:
+
+\`\`\`json
+{
+  "mcpServers": {
+    "plunk": {
+      "command": "npx",
+      "args": ["-y", "@plunk/mcp"],
+      "env": {
+        "PLUNK_API_KEY": "sk_your_key"
+      }
+    }
+  }
+}
+\`\`\`
+
+Self-hosting? Set \`PLUNK_API_URL\` to your own API domain.
+
+## Tools
+
+**Read-only** — the only tools registered when \`PLUNK_READ_ONLY=true\`: \`plunk_list_contacts\`, \`plunk_get_contact\`, \`plunk_get_email\`, \`plunk_verify_email\`, \`plunk_list_templates\`, \`plunk_list_campaigns\`, \`plunk_get_campaign\`, \`plunk_get_campaign_stats\`, \`plunk_list_segments\`, \`plunk_list_domains\`, \`plunk_check_domain\`, \`plunk_list_workflows\`, \`plunk_get_workflow\`, \`plunk_check_workflow\`, \`plunk_list_workflow_fields\`, \`plunk_list_workflow_executions\`, \`plunk_get_workflow_execution\`
+
+**Writing**: \`plunk_create_contact\`, \`plunk_update_contact\`, \`plunk_subscribe_contact\`, \`plunk_unsubscribe_contact\`, \`plunk_delete_contact\`, \`plunk_send_email\`, \`plunk_reschedule_email\`, \`plunk_cancel_email\`, \`plunk_track_event\`, \`plunk_create_template\`, \`plunk_create_campaign\`, \`plunk_test_campaign\`, \`plunk_send_campaign\`, \`plunk_cancel_campaign\`, \`plunk_create_segment\`, \`plunk_create_workflow\`, \`plunk_update_workflow\`, \`plunk_duplicate_workflow\`, \`plunk_delete_workflow\`, \`plunk_add_workflow_step\`, \`plunk_add_workflow_steps\`, \`plunk_update_workflow_step\`, \`plunk_delete_workflow_step\`, \`plunk_connect_workflow_steps\`, \`plunk_disconnect_workflow_steps\`, \`plunk_set_workflow_enabled\`, \`plunk_start_workflow_execution\`, \`plunk_cancel_workflow_executions\`
+
+Workflows are created disabled. The agent adds steps (emails, delays, yes/no and multi-branch conditions), and \`plunk_check_workflow\` reports anything that would fail at run time; enabling is refused while such errors remain.
+
+## Safety
+
+- **Sends ask you first.** Sending a campaign, or an email to more than one recipient, prompts you and shows the recipient count. Enabling a workflow that sends email asks too. The confirmation comes from you through your MCP client, not from the model.
+- **Read-only mode is structural.** With \`PLUNK_READ_ONLY=true\` the mutating tools are never registered, so they cannot be invoked at all.
+- **Account actions are out of reach.** Billing, project deletion, and key rotation require a dashboard session, so no tool can touch them.
+
+[Back to features](/features) | [Pricing](/pricing) | [Documentation](https://docs.useplunk.com/guides/mcp-server)
+`,
+  changelog: changelogMarkdown(),
 };
+
+/** Built from the same data as /changelog, so the two cannot drift apart. */
+function changelogMarkdown() {
+  const months = groupByMonth(CHANGELOG).map(month => {
+    const lines = month.entries.map(entry => {
+      const title = entry.href ? `[${entry.title}](${entry.href})` : entry.title;
+      return `- **${title}** (${formatDay(entry.date)}): ${entry.description}`;
+    });
+    return `## ${month.label}\n\n${lines.join('\n')}`;
+  });
+
+  return `# Changelog | Plunk
+
+Features and improvements we have shipped, newest first. Plunk is open source, so the full commit history is on GitHub: https://github.com/useplunk/plunk/commits/next
+
+${months.join('\n\n')}
+
+[Pricing](/pricing) | [Documentation](https://docs.useplunk.com)
+`;
+}
 
 export {MARKDOWN_SLUGS, hasMarkdownVariant} from './markdown-slugs';

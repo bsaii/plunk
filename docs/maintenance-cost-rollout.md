@@ -116,6 +116,27 @@ instance time and billing SKUs to measure actual savings.
 Sources: [Cloud Run pricing](https://cloud.google.com/run/pricing) and
 [Cloud Scheduler pricing](https://cloud.google.com/scheduler/pricing).
 
+## Upstream sweeps added in v0.14–v0.18
+
+Upstream registers three more sweeps as BullMQ repeatable jobs (`app.ts`). Under
+`QUEUE_BACKEND=cloud-tasks` they run through this maintenance job instead, as
+tasks of `maintenance-runner.ts`, on deliberately coarser schedules than
+upstream's:
+
+| Task | Upstream cadence | Here | Effect of the coarser cadence |
+| --- | --- | --- | --- |
+| `snooze-sweep` | every 5 min | daily (`05:30`) | A snoozed contact resubscribes up to a day late; windows are weeks to years. |
+| `campaign-stats-sweep` | every 2 min | every 6 hours (`:15`) | Campaign opens/clicks counters lag up to 6 hours (recounted from email rows, so nothing is lost). Tighten once campaigns are active. |
+| `scheduled-email-sweep` | every 5 min | hourly (`:45`) | Only a safety net: a scheduled email whose Cloud Task was lost goes out up to about an hour late. |
+
+Under the same one-minute-per-run assumption as the cost model below, these add
+about 870 executions per 30 days (roughly $1.0 compute plus about $0.3 for
+three Scheduler definitions, about $1.3 in total). Tighten a schedule in `terraform/gcp/maintenance.tf`
+if the lag matters more than the cost.
+
+The upstream card-verification sweep is intentionally not scheduled here: it
+only acts when Stripe is configured, and this deployment has no Stripe.
+
 ## Validation
 
 ```bash

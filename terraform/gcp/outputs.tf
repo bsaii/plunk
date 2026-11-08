@@ -29,7 +29,7 @@ output "maintenance_job_name" {
 }
 
 output "maintenance_scheduler_job_names" {
-  description = "Names of the 5 Cloud Scheduler jobs that trigger plunk-maintenance."
+  description = "Names of the 8 Cloud Scheduler jobs that trigger plunk-maintenance."
   value       = { for k, v in google_cloud_scheduler_job.maintenance : k => v.name }
 }
 

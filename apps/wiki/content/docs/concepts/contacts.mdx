@@ -12,7 +12,7 @@ Contacts can be added to your Plunk project in several ways:
 
 - Using [`/v1/track`](/api-reference/public-api/trackEvent) — tracking an event for a contact that doesn't exist yet automatically creates it (subscribed by default).
 - Using [`POST /contacts`](/api-reference/contacts/createContact) — create or upsert a single contact. Existing emails are **updated**, not rejected; the response includes a `_meta: { isNew, isUpdate }` block and uses status `201` for new contacts and `200` for updates.
-- Bulk **CSV import** via `POST /contacts/import` — upload a CSV (≤ 5 MB) and poll `GET /contacts/import/:jobId` for status. The first column must be `email`; any other columns map to keys under `data.*`.
+- Bulk **CSV import** via `POST /contacts/import` — upload a CSV (≤ 5 MB) and poll `GET /contacts/import/:jobId` for status. The file needs an `email` column, an optional `subscribed` column sets subscription status, and any other columns map to lowercase keys under `data.*`.
 - Bulk **subscribe / unsubscribe / delete** via `POST /contacts/bulk-subscribe`, `bulk-unsubscribe`, and `bulk-delete` — each accepts up to 1,000 contact IDs and returns a job ID; poll `GET /contacts/bulk/:jobId` for progress.
 - Adding emails to a **static segment** with `POST /segments/:id/members` and `createMissing: true` will create any contacts that don't already exist.
 - Manually through the dashboard.
@@ -79,6 +79,7 @@ Some keys are reserved by Plunk and managed at the contact level (not inside `da
 | `createdAt`  | Timestamp of when the contact was created                                |
 | `updatedAt`  | Timestamp of the last update                                             |
 | `subscribed` | Boolean indicating whether the contact is subscribed to marketing emails |
+| `snoozedUntil` | Timestamp when a snooze ends, or `null`. See [Snoozing](#snoozing) |
 
 The following keys are also **silently filtered out** of any `data` payload — sending them through `/v1/track`, `POST /contacts`, or `PATCH /contacts/:id` will not store them and will not return an error:
 
@@ -111,8 +112,19 @@ A contact can become unsubscribed in several ways:
 
 - **Manually** through the dashboard or via the API.
 - **Self-service** by clicking the unsubscribe link in an email (powered by the public unsubscribe pages).
+- **Self-service, temporarily** by snoozing instead of unsubscribing — see below.
 - **Automatically** on a permanent (hard) email bounce. Soft bounces don't change subscription state.
 - **Automatically** when a recipient marks one of your emails as spam (their mailbox provider reports the complaint back to Plunk).
+
+### Snoozing
+
+A recipient can pause emails for 2 weeks, 1 month, 6 months, or a year instead of leaving permanently. A snoozed contact has `subscribed: false` — so every rule on this page applies to them unchanged — plus a `snoozedUntil` timestamp saying when they come back.
+
+A background job resubscribes them when the window ends and fires `contact.subscribed` with `reason: "snooze_expired"`. The snooze itself fires `contact.unsubscribed` with `reason: "snooze"`.
+
+Any other change to `subscribed` cancels a running snooze, including a bounce or complaint — a suppressed address is never resurrected by a snooze that was in flight.
+
+See [Unsubscribe & preferences pages](/guides/unsubscribe-pages#snoozing) for the full behaviour.
 
 ### Emails by subscription state
 

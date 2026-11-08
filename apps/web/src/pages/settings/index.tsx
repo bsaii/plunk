@@ -4,20 +4,13 @@ import {zodResolver} from '@hookform/resolvers/zod';
 import {ProjectSchemas, SUPPORTED_LANGUAGES} from '@plunk/shared';
 import {TrackingMode} from '@plunk/db';
 import {
-  Alert,
-  AlertDescription,
   Button,
   Card,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
+  ConfirmDialog,
   Form,
   FormControl,
   FormDescription,
@@ -39,7 +32,18 @@ import {
 } from '@plunk/ui';
 import {AnimatePresence, motion} from 'framer-motion';
 import {NextSeo} from 'next-seo';
-import {AlertTriangle, CreditCard, Database, Globe, Mail, Settings as SettingsIcon, Shield, Users} from 'lucide-react';
+import {
+  AlertTriangle,
+  CreditCard,
+  Database,
+  Globe,
+  KeyRound,
+  Mail,
+  RotateCcw,
+  Settings as SettingsIcon,
+  Shield,
+  Users,
+} from 'lucide-react';
 import type {z} from 'zod';
 import {useRouter} from 'next/router';
 import {DashboardLayout} from '../../components/DashboardLayout';
@@ -70,6 +74,16 @@ interface Tab {
   condition?: boolean;
 }
 
+/** Why sending is paused, for the pauses the customer clears by updating their card. */
+const BILLING_PAUSE_COPY: Record<string, string> = {
+  PAYMENT_FAILED:
+    'Your last payment didn’t go through. Add a working card and we’ll retry the payment straight away. Sending resumes once it’s paid.',
+  CARD_VERIFICATION_FAILED:
+    'Your card declined the charge we use to confirm it supports monthly billing. Add a standard credit or debit card (prepaid cards aren’t supported) and we’ll verify it straight away.',
+  CARD_VERIFICATION_REQUIRED:
+    'Your bank didn’t approve the charge we use to confirm your card supports monthly billing. Add your card again, or a different one, and we’ll verify it straight away.',
+};
+
 const buildTabs = (options: {billingEnabled: boolean; smtpEnabled: boolean}): Tab[] => {
   const {billingEnabled, smtpEnabled} = options;
   const allTabs: Tab[] = [
@@ -92,8 +106,6 @@ export default function Settings() {
   const {data: user} = useUser();
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [deleteConfirmText, setDeleteConfirmText] = useState('');
-  const [resetConfirmText, setResetConfirmText] = useState('');
 
   type SettingsDialog = {type: 'none'} | {type: 'regenerate'} | {type: 'delete'} | {type: 'reset'};
   const [dialog, setDialog] = useState<SettingsDialog>({type: 'none'});
@@ -113,6 +125,7 @@ export default function Settings() {
   const {securityMetrics, isLoading: isLoadingSecurityMetrics} = useProjectSecurity(activeProject?.id);
 
   const billingEnabled = config?.features.billing.enabled ?? false;
+  const billingPause = activeProject?.disabled ? BILLING_PAUSE_COPY[activeProject.disabledReason ?? ''] : undefined;
   const smtpEnabled = config?.features.smtp.enabled ?? false;
   const trackingToggleEnabled = config?.features.email.trackingToggleEnabled ?? false;
   const smtpConfig = smtpEnabled
@@ -146,7 +159,7 @@ export default function Settings() {
     if (router.query.success === 'true') {
       // Use setTimeout to defer state update, avoiding synchronous setState in effect
       const timer = setTimeout(() => {
-        setSuccessMessage('Subscription activated successfully! It may take a moment to update.');
+        setSuccessMessage('Subscription active. Billing details may take a minute to appear.');
         // Clear message and URL after 5 seconds
         setTimeout(() => {
           setSuccessMessage(null);
@@ -207,12 +220,12 @@ export default function Settings() {
       // Refresh projects list
       await projectsMutate();
 
-      setSuccessMessage('Project settings updated successfully');
+      setSuccessMessage('Project settings updated');
 
       // Clear success message after 3 seconds
       setTimeout(() => setSuccessMessage(null), 3000);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to update project settings');
+      setErrorMessage(error instanceof Error ? error.message : 'Couldn’t save your project settings. Try again.');
     }
   };
 
@@ -234,13 +247,13 @@ export default function Settings() {
       // Refresh projects list
       await projectsMutate();
 
-      setSuccessMessage('API keys regenerated successfully');
+      setSuccessMessage('API keys regenerated');
       setDialog({type: 'none'});
 
       // Clear success message after 3 seconds
       setTimeout(() => setSuccessMessage(null), 3000);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to regenerate API keys');
+      setErrorMessage(error instanceof Error ? error.message : 'Couldn’t regenerate your API keys. Try again.');
       setDialog({type: 'none'});
     }
   };
@@ -273,7 +286,7 @@ export default function Settings() {
         window.location.href = response.url;
       }
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to start checkout');
+      setErrorMessage(error instanceof Error ? error.message : 'Couldn’t open checkout. Try again in a moment.');
       setIsLoadingBilling(false);
     }
   };
@@ -299,13 +312,13 @@ export default function Settings() {
         window.location.href = response.url;
       }
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to open billing portal');
+      setErrorMessage(error instanceof Error ? error.message : 'Couldn’t open the billing portal. Try again in a moment.');
       setIsLoadingBilling(false);
     }
   };
 
   const handleResetProject = async () => {
-    if (!activeProject || resetConfirmText !== 'RESET') return;
+    if (!activeProject) return;
 
     try {
       setErrorMessage(null);
@@ -313,23 +326,21 @@ export default function Settings() {
 
       await network.fetch('POST', `/users/@me/projects/${activeProject.id}/reset`);
 
-      setSuccessMessage('Project reset successfully. All data has been cleared.');
+      setSuccessMessage('Project reset. All campaigns, contacts, workflows, templates, and events are gone.');
       setDialog({type: 'none'});
-      setResetConfirmText('');
 
       // Refresh the page to reload data
       setTimeout(() => {
         window.location.reload();
       }, 1500);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to reset project');
+      setErrorMessage(error instanceof Error ? error.message : 'Couldn’t reset the project. Try again.');
       setDialog({type: 'none'});
-      setResetConfirmText('');
     }
   };
 
   const handleDeleteProject = async () => {
-    if (!activeProject || deleteConfirmText !== 'DELETE') return;
+    if (!activeProject) return;
 
     try {
       setErrorMessage(null);
@@ -337,9 +348,8 @@ export default function Settings() {
 
       await network.fetch('DELETE', `/users/@me/projects/${activeProject.id}`);
 
-      setSuccessMessage('Project deleted successfully. Redirecting...');
+      setSuccessMessage('Project deleted. Redirecting…');
       setDialog({type: 'none'});
-      setDeleteConfirmText('');
 
       // Refresh projects list and redirect to dashboard
       await projectsMutate();
@@ -349,9 +359,8 @@ export default function Settings() {
         window.location.href = '/';
       }, 1500);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to delete project');
+      setErrorMessage(error instanceof Error ? error.message : 'Couldn’t delete the project. Try again.');
       setDialog({type: 'none'});
-      setDeleteConfirmText('');
     }
   };
 
@@ -376,7 +385,7 @@ export default function Settings() {
           {/* Header */}
           <div>
             <h1 className="text-2xl sm:text-3xl font-bold text-neutral-900">Settings</h1>
-            <p className="text-neutral-500 mt-2">Manage your project settings and preferences</p>
+            <p className="text-neutral-500 mt-2">Settings for this project.</p>
           </div>
 
           {/* Tabs */}
@@ -398,8 +407,7 @@ export default function Settings() {
               <div className="space-y-6">
               <Card>
                 <CardHeader>
-                  <CardTitle>Project Settings</CardTitle>
-                  <CardDescription>Update your project name and basic information</CardDescription>
+                  <CardTitle>Project settings</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <Form {...form}>
@@ -409,9 +417,9 @@ export default function Settings() {
                         name="name"
                         render={({field}) => (
                           <FormItem>
-                            <FormLabel>Project Name</FormLabel>
+                            <FormLabel>Project name</FormLabel>
                             <FormControl>
-                              <Input placeholder="My Awesome Project" {...field} />
+                              <Input placeholder="e.g., Acme" {...field} />
                             </FormControl>
                             <FormMessage />
                           </FormItem>
@@ -425,7 +433,7 @@ export default function Settings() {
                           name="tracking"
                           render={({field}) => (
                             <FormItem>
-                              <FormLabel>Email Tracking</FormLabel>
+                              <FormLabel>Email tracking</FormLabel>
                               <Select onValueChange={field.onChange} defaultValue={field.value}>
                                 <FormControl>
                                   <SelectTrigger>
@@ -445,7 +453,7 @@ export default function Settings() {
                                   />
                                   <SelectItemWithDescription
                                     value={TrackingMode.MARKETING_ONLY}
-                                    title="Marketing Only"
+                                    title="Marketing only"
                                     description="Track only campaigns and workflow emails, not transactional"
                                   />
                                 </SelectContent>
@@ -465,7 +473,7 @@ export default function Settings() {
                         name="language"
                         render={({field}) => (
                           <FormItem>
-                            <FormLabel>Customer Language</FormLabel>
+                            <FormLabel>Customer language</FormLabel>
                             <Select onValueChange={field.onChange} defaultValue={field.value || 'en'}>
                               <FormControl>
                                 <SelectTrigger>
@@ -518,7 +526,7 @@ export default function Settings() {
 
                       <div className="flex justify-end">
                         <Button type="submit" disabled={form.formState.isSubmitting}>
-                          {form.formState.isSubmitting ? 'Saving...' : 'Save Changes'}
+                          {form.formState.isSubmitting ? 'Saving…' : 'Save Changes'}
                         </Button>
                       </div>
                     </form>
@@ -531,22 +539,22 @@ export default function Settings() {
                 <CardHeader>
                   <div className="flex items-center justify-between">
                     <div>
-                      <CardTitle>API Credentials</CardTitle>
+                      <CardTitle>API keys</CardTitle>
                       <CardDescription>Use these keys to integrate with the Plunk API</CardDescription>
                     </div>
                     <Button type="button" variant="outline" size="sm" onClick={promptRegenerateKeys}>
-                      Regenerate Keys
+                      Regenerate keys
                     </Button>
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <ApiKeyDisplay
-                    label="Public API Key"
+                    label="Public key"
                     value={activeProject.public}
                     description="Use this key for client-side integrations"
                   />
                   <ApiKeyDisplay
-                    label="Secret API Key"
+                    label="Secret key"
                     value={activeProject.secret}
                     description="Keep this key secure and never expose it publicly"
                     isSecret
@@ -562,7 +570,7 @@ export default function Settings() {
                       <AlertTriangle className="h-5 w-5 text-red-600" />
                     </div>
                     <div>
-                      <CardTitle className="text-lg text-red-900">Danger Zone</CardTitle>
+                      <CardTitle className="text-lg text-red-900">Danger zone</CardTitle>
                       <CardDescription className="text-red-700">
                         Irreversible actions that affect your project data
                       </CardDescription>
@@ -576,11 +584,10 @@ export default function Settings() {
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-1.5">
                           <Database className="h-4 w-4 text-amber-700" />
-                          <h4 className="font-semibold text-neutral-900">Reset Project Data</h4>
+                          <h4 className="font-semibold text-neutral-900">Reset project data</h4>
                         </div>
                         <p className="text-sm text-neutral-600 mb-3">
-                          Clear all campaigns, contacts, workflows, templates, and events. This gives you a blank
-                          project to start fresh.
+                          Clear all campaigns, contacts, workflows, templates, and events.
                         </p>
                         <div className="flex items-start gap-2 text-xs text-neutral-500">
                           <span className="font-medium">Preserved:</span>
@@ -588,7 +595,7 @@ export default function Settings() {
                         </div>
                       </div>
                       <Button type="button" variant="outline" onClick={() => setDialog({type: 'reset'})} className="shrink-0">
-                        Reset Data
+                        Reset data
                       </Button>
                     </div>
 
@@ -597,7 +604,7 @@ export default function Settings() {
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-1.5">
                           <AlertTriangle className="h-4 w-4 text-red-600" />
-                          <h4 className="font-semibold text-red-900">Delete Project Permanently</h4>
+                          <h4 className="font-semibold text-red-900">Delete project</h4>
                         </div>
                         <p className="text-sm text-red-800 mb-3">
                           Permanently delete this project and all associated data. This action{' '}
@@ -606,7 +613,7 @@ export default function Settings() {
                         </p>
                         <div className="flex items-center gap-2 text-xs">
                           <span className="px-2 py-1 bg-red-100 text-red-700 rounded font-medium">
-                            Permanent Deletion
+                            Permanent deletion
                           </span>
                           <span className="text-red-600">All data will be lost</span>
                         </div>
@@ -617,7 +624,7 @@ export default function Settings() {
                         onClick={() => setDialog({type: 'delete'})}
                         className="shrink-0"
                       >
-                        Delete Project
+                        Delete project
                       </Button>
                     </div>
                   </div>
@@ -634,8 +641,7 @@ export default function Settings() {
 
                 <Card>
                   <CardHeader>
-                    <CardTitle>Billing & Subscription</CardTitle>
-                    <CardDescription>Manage your subscription and billing information</CardDescription>
+                    <CardTitle>Billing</CardTitle>
                   </CardHeader>
                   <CardContent>
                     <div className="space-y-6">
@@ -666,20 +672,30 @@ export default function Settings() {
                       {activeProject.subscription ? (
                         // Has subscription - show billing portal button
                         <div className="space-y-4">
-                          <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
-                            <div className="flex items-center gap-2 text-green-800 mb-2">
-                              <CreditCard className="h-5 w-5" />
-                              <span className="font-medium">Active Subscription</span>
+                          {billingPause ? (
+                            <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg">
+                              <div className="flex items-center gap-2 text-amber-900 mb-2">
+                                <CreditCard className="h-5 w-5" />
+                                <span className="font-medium">Sending paused: update your card</span>
+                              </div>
+                              <p className="text-sm text-amber-800">{billingPause}</p>
                             </div>
-                            <p className="text-sm text-green-700">
-                              Your subscription is active. Manage your billing details, update payment methods, or
-                              cancel your subscription through the billing portal.
-                            </p>
-                          </div>
+                          ) : (
+                            <div className="p-4 bg-green-50 border border-green-200 rounded-lg">
+                              <div className="flex items-center gap-2 text-green-800 mb-2">
+                                <CreditCard className="h-5 w-5" />
+                                <span className="font-medium">Active subscription</span>
+                              </div>
+                              <p className="text-sm text-green-700">
+                                Your subscription is active. Manage your billing details, update payment methods, or
+                                cancel your subscription through the billing portal.
+                              </p>
+                            </div>
+                          )}
 
                           <div className="flex justify-start">
                             <Button onClick={handleManageBilling} disabled={isLoadingBilling}>
-                              {isLoadingBilling ? 'Loading...' : 'Manage Billing'}
+                              {isLoadingBilling ? 'Loading…' : billingPause ? 'Update card' : 'Manage Billing'}
                             </Button>
                           </div>
                         </div>
@@ -689,12 +705,21 @@ export default function Settings() {
                           <div className="p-4 bg-neutral-50 border border-neutral-200 rounded-lg">
                             <div className="flex items-center gap-2 text-neutral-800 mb-2">
                               <CreditCard className="h-5 w-5" />
-                              <span className="font-medium">No Active Subscription</span>
+                              <span className="font-medium">No active subscription</span>
                             </div>
                             <p className="text-sm text-neutral-600">
-                              Start a subscription and support the development of Plunk. You will be charged a one-time
-                              onboarding fee which will be credited to your first invoice.
+                              Activation places one charge of 2.00 on your card, credited back in full to your usage.
                             </p>
+                            <details className="group mt-2">
+                              <summary className="cursor-pointer text-xs text-neutral-500 hover:text-neutral-700 transition-colors list-none">
+                                Why the charge?
+                              </summary>
+                              <p className="mt-2 text-xs text-neutral-500">
+                                It runs right after checkout to confirm your card accepts automatic monthly billing.
+                                Prepaid, virtual, and single-use cards often accept a payment you approve yourself but
+                                refuse recurring charges later, so we check now rather than a month in.
+                              </p>
+                            </details>
                           </div>
 
                           <div className="flex flex-col gap-2">
@@ -703,7 +728,7 @@ export default function Settings() {
                                 onClick={() => handleStartSubscription(selectedCurrency)}
                                 disabled={isLoadingBilling}
                               >
-                                {isLoadingBilling ? 'Loading...' : 'Start Subscription'}
+                                {isLoadingBilling ? 'Loading…' : 'Start Subscription'}
                               </Button>
                             </div>
 
@@ -785,11 +810,11 @@ export default function Settings() {
               ) : (
                 <Card>
                   <CardHeader>
-                    <CardTitle>Security Overview</CardTitle>
+                    <CardTitle>Security overview</CardTitle>
                   </CardHeader>
                   <CardContent>
                     <p className="text-sm text-neutral-500">
-                      {isLoadingSecurityMetrics ? 'Loading...' : 'Unable to load security metrics'}
+                      {isLoadingSecurityMetrics ? 'Loading…' : 'Unable to load security metrics'}
                     </p>
                   </CardContent>
                 </Card>
@@ -813,145 +838,47 @@ export default function Settings() {
           </Tabs>
         </div>
 
-        {/* Regenerate Keys Confirmation Dialog */}
-        <Dialog open={dialog.type === 'regenerate'} onOpenChange={open => !open && setDialog({type: 'none'})}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <AlertTriangle className="h-5 w-5 text-amber-600" />
-                Regenerate API Keys
-              </DialogTitle>
-              <DialogDescription className="space-y-3">
-                <p>Are you sure you want to regenerate your API keys?</p>
-                <Alert variant="warning">
-                  <AlertTriangle className="h-4 w-4" />
-                  <AlertDescription>
-                    Current keys will be <strong>immediately invalidated</strong>. Any integrations using the old keys
-                    will stop working until updated.
-                  </AlertDescription>
-                </Alert>
-              </DialogDescription>
-            </DialogHeader>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setDialog({type: 'none'})}>
-                Cancel
-              </Button>
-              <Button variant="destructive" onClick={handleRegenerateKeys}>
-                Regenerate Keys
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+        <ConfirmDialog
+          open={dialog.type === 'regenerate'}
+          onOpenChange={open => !open && setDialog({type: 'none'})}
+          onConfirm={handleRegenerateKeys}
+          title="Regenerate API keys?"
+          description="Your current keys stop working immediately. Every integration using them fails until you swap in the new ones."
+          icon={KeyRound}
+          confirmText="Regenerate keys"
+          loadingText="Regenerating…"
+          variant="destructive"
+        />
 
-        {/* Reset Project Confirmation Dialog */}
-        <Dialog open={dialog.type === 'reset'} onOpenChange={open => !open && setDialog({type: 'none'})}>
-          <DialogContent className="sm:max-w-md">
-            <DialogHeader className="space-y-3">
-              <div className="mx-auto w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center">
-                <Database className="h-6 w-6 text-amber-700" />
-              </div>
-              <DialogTitle className="text-center text-xl">Reset Project Data?</DialogTitle>
-              <DialogDescription className="text-center text-base">
-                All your campaigns, contacts, workflows, and templates will be permanently deleted. Your API keys and
-                settings will remain intact.
-              </DialogDescription>
-            </DialogHeader>
+        <ConfirmDialog
+          open={dialog.type === 'reset'}
+          onOpenChange={open => !open && setDialog({type: 'none'})}
+          onConfirm={handleResetProject}
+          title="Reset project data?"
+          description="Every campaign, contact, workflow, template and event in this project is deleted. Your API keys, domains and billing stay as they are."
+          icon={RotateCcw}
+          confirmPhrase="RESET"
+          confirmText="Reset data"
+          loadingText="Resetting…"
+          variant="destructive"
+        />
 
-            <div className="py-4">
-              <label className="text-sm font-medium text-neutral-700 block mb-2 text-center">
-                Type{' '}
-                <span className="font-mono font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded">RESET</span>{' '}
-                to confirm
-              </label>
-              <Input
-                value={resetConfirmText}
-                onChange={e => setResetConfirmText(e.target.value)}
-                placeholder="Type RESET here"
-                className="text-center"
-                autoFocus
-              />
-            </div>
+        <ConfirmDialog
+          open={dialog.type === 'delete'}
+          onOpenChange={open => !open && setDialog({type: 'none'})}
+          onConfirm={handleDeleteProject}
+          title={`Delete ${activeProject.name}?`}
+          description={
+            activeProject.subscription
+              ? 'This permanently deletes the project and everything in it, and cancels its subscription. It cannot be undone.'
+              : 'This permanently deletes the project and everything in it. It cannot be undone.'
+          }
+          confirmPhrase="DELETE"
+          confirmText="Delete project"
+          loadingText="Deleting…"
+          variant="destructive"
+        />
 
-            <DialogFooter className="flex-col-reverse gap-2">
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setDialog({type: 'none'});
-                  setResetConfirmText('');
-                }}
-                className="w-full"
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="destructive"
-                onClick={handleResetProject}
-                disabled={resetConfirmText !== 'RESET'}
-                className="w-full"
-              >
-                Reset Data
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-
-        {/* Delete Project Confirmation Dialog */}
-        <Dialog open={dialog.type === 'delete'} onOpenChange={open => !open && setDialog({type: 'none'})}>
-          <DialogContent className="sm:max-w-md">
-            <DialogHeader className="space-y-3">
-              <div className="mx-auto w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
-                <AlertTriangle className="h-6 w-6 text-red-600" />
-              </div>
-              <DialogTitle className="text-center text-xl">Delete Project Permanently?</DialogTitle>
-              <DialogDescription className="text-center text-base space-y-2">
-                <p>
-                  This will <strong className="text-red-600">permanently delete</strong> your entire project and all
-                  data. This action cannot be undone.
-                </p>
-                {activeProject?.subscription && (
-                  <p className="text-sm text-red-700 bg-red-50 rounded p-2 border border-red-200">
-                    Your active subscription will be canceled
-                  </p>
-                )}
-              </DialogDescription>
-            </DialogHeader>
-
-            <div className="py-4">
-              <label className="text-sm font-medium text-neutral-700 block mb-2 text-center">
-                Type <span className="font-mono font-semibold text-red-600 bg-red-50 px-2 py-0.5 rounded">DELETE</span>{' '}
-                to confirm
-              </label>
-              <Input
-                value={deleteConfirmText}
-                onChange={e => setDeleteConfirmText(e.target.value)}
-                placeholder="Type DELETE here"
-                className="text-center"
-                autoFocus
-              />
-            </div>
-
-            <DialogFooter className="flex-col-reverse gap-2">
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setDialog({type: 'none'});
-                  setDeleteConfirmText('');
-                }}
-                className="w-full"
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="destructive"
-                onClick={handleDeleteProject}
-                disabled={deleteConfirmText !== 'DELETE'}
-                className="w-full"
-              >
-                Delete Forever
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
       </DashboardLayout>
     </>
   );

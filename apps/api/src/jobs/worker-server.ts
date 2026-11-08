@@ -48,7 +48,7 @@ async function processEnvelope(envelope: CloudTaskEnvelope): Promise<void> {
 
   switch (envelope.queue) {
     case 'email':
-      result = await processEmailJob(data as Extract<RealTimeQueueJobData, {emailId: string}>);
+      result = await processEmailJob((data as Extract<RealTimeQueueJobData, {emailId: string}>).emailId);
       break;
     case 'campaign':
       result = await processCampaignJob(data as Extract<RealTimeQueueJobData, {campaignId: string; batchNumber: number}>);

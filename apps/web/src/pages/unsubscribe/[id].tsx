@@ -1,232 +1,162 @@
-import {Button, Card, CardContent, IconSpinner} from '@plunk/ui';
-import {createTranslator, type Translator} from '@plunk/shared';
-import {AnimatePresence, motion} from 'framer-motion';
+import {ContactSchemas} from '@plunk/shared';
+import type {SnoozeDuration} from '@plunk/types';
+import {Button, IconSpinner} from '@plunk/ui';
+import {Check, Clock} from 'lucide-react';
 import {useRouter} from 'next/router';
-import React, {useEffect, useState} from 'react';
+import React, {useState} from 'react';
 
+import {
+  CardFooterNote,
+  CardIntro,
+  ErrorCard,
+  FooterAction,
+  InlineError,
+  LoadingCard,
+  RecipientShell,
+  ResultState,
+  RichText,
+  SnoozePicker,
+  useRecipient,
+} from '../../components/list-management/ListManagement';
 import {network} from '../../lib/network';
-
-interface ContactInfo {
-  id: string;
-  email: string;
-  subscribed: boolean;
-  language: string;
-}
+import {type ContactInfo, formatSnoozeDate, isSnoozed} from '../../lib/snooze';
+import {sourceEmailQuery, withSourceEmail} from '../../lib/sourceEmail';
 
 export default function Unsubscribe() {
   const router = useRouter();
   const {id} = router.query;
+  const {state, updateContact} = useRecipient(id);
 
-  const [contact, setContact] = useState<ContactInfo | null>(null);
-  const [translator, setTranslator] = useState<Translator | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [unsubscribing, setUnsubscribing] = useState(false);
-  const [success, setSuccess] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!id || typeof id !== 'string') return;
+  if (state.status === 'loading') {
+    return (
+      <RecipientShell page="unsubscribe" loading>
+        <LoadingCard />
+      </RecipientShell>
+    );
+  }
 
-    const fetchContact = async () => {
-      try {
-        setLoading(true);
-        const data = await network.fetch<ContactInfo>('GET', `/contacts/public/${id}`);
-        setContact(data);
+  if (state.status === 'error') {
+    return (
+      <RecipientShell page="unsubscribe" translator={state.translator}>
+        <ErrorCard translator={state.translator} message={state.message} />
+      </RecipientShell>
+    );
+  }
 
-        // Load translations for the project's language
-        const t = await createTranslator(data.language || 'en');
-        setTranslator(t);
-
-        setError(null);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load contact information');
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    void fetchContact();
-  }, [id]);
+  const {contact, translator} = state;
+  const contactId = id as string;
+  const goTo = (path: string) => void router.push(withSourceEmail(path, router.query));
 
   const handleUnsubscribe = async () => {
-    if (!id || typeof id !== 'string') return;
-
     try {
       setUnsubscribing(true);
-      const data = await network.fetch<ContactInfo>('POST', `/contacts/public/${id}/unsubscribe`);
-      setContact(data);
-      setSuccess(true);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to unsubscribe');
+      setActionError(null);
+      const data = await network.fetch<ContactInfo>(
+        'POST',
+        `/contacts/public/${contactId}/unsubscribe${sourceEmailQuery(router.query)}`,
+      );
+      updateContact(data);
+    } catch {
+      // Translated copy rather than the server's English message; see useRecipient.
+      setActionError(translator.t('pages.common.actionFailed'));
     } finally {
       setUnsubscribing(false);
     }
   };
 
-  // Don't render until translations are loaded
-  if (!translator) {
+  const handleSnooze = async (duration: SnoozeDuration) => {
+    try {
+      setActionError(null);
+      const data = await network.fetch<ContactInfo, typeof ContactSchemas.snooze>(
+        'POST',
+        `/contacts/public/${contactId}/snooze${sourceEmailQuery(router.query)}`,
+        {duration},
+      );
+      updateContact(data);
+    } catch {
+      // Translated copy rather than the server's English message; see useRecipient.
+      setActionError(translator.t('pages.common.actionFailed'));
+    }
+  };
+
+  // Checked before the unsubscribed state: a snoozed contact is `subscribed: false` too, and
+  // telling someone who asked for a break that they are gone would be wrong.
+  if (isSnoozed(contact)) {
     return (
-      <div className={'h-screen flex items-center justify-center bg-neutral-50'}>
-        <div className={'flex flex-col gap-6 max-w-2xl w-full px-4'}>
-          <Card>
-            <CardContent className="p-8">
-              <div className="flex flex-col items-center gap-4">
-                <IconSpinner />
-                <p className="text-sm text-neutral-500">Loading...</p>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
+      <RecipientShell page="unsubscribe" translator={translator}>
+        <ResultState icon={Clock} title={translator.t('pages.snooze.successTitle')}>
+          <RichText
+            template={translator.t('pages.snooze.successDescription')}
+            values={{projectName: contact.projectName, email: contact.email, date: formatSnoozeDate(contact.snoozedUntil, contact.language)}}
+          />
+        </ResultState>
+        <CardFooterNote>
+          <FooterAction onClick={() => goTo(`/subscribe/${contactId}`)}>{translator.t('pages.snooze.resume')}</FooterAction>
+        </CardFooterNote>
+      </RecipientShell>
     );
   }
 
-  if (loading) {
+  if (!contact.subscribed) {
     return (
-      <div className={'h-screen flex items-center justify-center bg-neutral-50'}>
-        <div className={'flex flex-col gap-6 max-w-2xl w-full px-4'}>
-          <Card>
-            <CardContent className="p-8">
-              <div className="flex flex-col items-center gap-4">
-                <IconSpinner />
-                <p className="text-sm text-neutral-500">{translator.t('pages.common.loading')}</p>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-    );
-  }
-
-  if (error && !contact) {
-    return (
-      <div className={'h-screen flex items-center justify-center bg-neutral-50'}>
-        <div className={'flex flex-col gap-6 max-w-2xl w-full px-4'}>
-          <Card>
-            <CardContent className="p-8">
-              <div className="flex flex-col items-center gap-4 text-center">
-                <div className="h-12 w-12 rounded-full bg-red-100 flex items-center justify-center">
-                  <svg
-                    className="h-6 w-6 text-red-600"
-                    fill="none"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="2"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </div>
-                <h1 className="text-2xl font-bold text-neutral-900">{translator.t('pages.common.error')}</h1>
-                <p className="text-neutral-500">{error}</p>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-    );
-  }
-
-  if (success || (contact && !contact.subscribed)) {
-    return (
-      <div className={'h-screen flex items-center justify-center bg-neutral-50'}>
-        <div className={'flex flex-col gap-6 max-w-2xl w-full px-4'}>
-          <Card>
-            <CardContent className="p-8">
-              <div className="flex flex-col items-center gap-4 text-center">
-                <motion.div
-                  initial={{scale: 0}}
-                  animate={{scale: 1}}
-                  transition={{type: 'spring', stiffness: 200, damping: 15}}
-                  className="h-12 w-12 rounded-full bg-green-100 flex items-center justify-center"
-                >
-                  <svg
-                    className="h-6 w-6 text-green-600"
-                    fill="none"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="2"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                  >
-                    <path d="M5 13l4 4L19 7" />
-                  </svg>
-                </motion.div>
-                <h1 className="text-2xl font-bold text-neutral-900">
-                  {translator.t('pages.unsubscribe.successTitle')}
-                </h1>
-                <p className="text-neutral-500">
-                  {translator.t('pages.unsubscribe.successDescription', {email: contact?.email || ''})}
-                </p>
-                <p className="text-sm text-neutral-400 mt-2">
-                  {translator.t('pages.unsubscribe.changedMind')}{' '}
-                  <button
-                    onClick={() => router.push(`/subscribe/${id as string}`)}
-                    className="underline hover:text-neutral-600"
-                  >
-                    {translator.t('pages.unsubscribe.subscribeAgain')}
-                  </button>
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
+      <RecipientShell page="unsubscribe" translator={translator}>
+        <ResultState icon={Check} title={translator.t('pages.unsubscribe.successTitle')}>
+          <RichText template={translator.t('pages.unsubscribe.successDescription')} values={{projectName: contact.projectName, email: contact.email}} />
+        </ResultState>
+        <CardFooterNote>
+          {translator.t('pages.unsubscribe.changedMind')}{' '}
+          <FooterAction onClick={() => goTo(`/subscribe/${contactId}`)}>
+            {translator.t('pages.unsubscribe.subscribeAgain')}
+          </FooterAction>
+        </CardFooterNote>
+      </RecipientShell>
     );
   }
 
   return (
-    <div className={'h-screen flex items-center justify-center bg-neutral-50'}>
-      <div className={'flex flex-col gap-6 max-w-2xl w-full px-4'}>
-        <Card>
-          <CardContent className="p-8">
-            <div className="flex flex-col gap-6">
-              <div className="flex flex-col items-center text-center gap-2">
-                <h1 className="text-2xl font-bold text-neutral-900">{translator.t('pages.unsubscribe.title')}</h1>
-                <p className="text-neutral-500">
-                  {translator.t('pages.unsubscribe.description', {email: contact?.email || ''})}
-                </p>
-              </div>
+    <RecipientShell page="unsubscribe" translator={translator}>
+      <div className="flex flex-col gap-6 p-6 sm:p-8">
+        <CardIntro title={translator.t('pages.unsubscribe.title')}>
+          <RichText template={translator.t('pages.unsubscribe.description')} values={{projectName: contact.projectName, email: contact.email}} />
+        </CardIntro>
 
-              <AnimatePresence>
-                {error && (
-                  <motion.p
-                    initial={{opacity: 0, y: -10}}
-                    animate={{opacity: 1, y: 0}}
-                    exit={{opacity: 0, y: -10}}
-                    className="text-sm font-medium text-red-500 text-center"
-                  >
-                    {error}
-                  </motion.p>
-                )}
-              </AnimatePresence>
+        <InlineError message={actionError} />
 
-              <div className="flex flex-col gap-3">
-                <Button
-                  onClick={() => void handleUnsubscribe()}
-                  variant="destructive"
-                  className="w-full"
-                  disabled={unsubscribing}
-                >
-                  {unsubscribing ? (
-                    <div className="flex items-center gap-2">
-                      <IconSpinner size="sm" />
-                      <span>{translator.t('pages.unsubscribe.buttonLoading')}</span>
-                    </div>
-                  ) : (
-                    translator.t('pages.unsubscribe.button')
-                  )}
-                </Button>
-                <Button variant="outline" className="w-full" onClick={() => router.push(`/manage/${id as string}`)}>
-                  {translator.t('pages.unsubscribe.managePreferences')}
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+        <div className="flex flex-col gap-2">
+          {/*
+            Neutral, not red. Unsubscribing is what this recipient came to do, not a mistake to
+            be warned off; painting it as danger is a dark pattern on the one page where the
+            sender's reputation depends on the exit being easy.
+          */}
+          <Button
+            size="lg"
+            className="w-full"
+            disabled={unsubscribing}
+            aria-busy={unsubscribing || undefined}
+            onClick={() => void handleUnsubscribe()}
+          >
+            {unsubscribing ? (
+              <>
+                <IconSpinner size="sm" />
+                {translator.t('pages.unsubscribe.buttonLoading')}
+              </>
+            ) : (
+              translator.t('pages.unsubscribe.button')
+            )}
+          </Button>
+
+          <SnoozePicker translator={translator} onSnooze={handleSnooze} disabled={unsubscribing} />
+        </div>
       </div>
-    </div>
+
+      <CardFooterNote>
+        <FooterAction onClick={() => goTo(`/manage/${contactId}`)}>
+          {translator.t('pages.unsubscribe.managePreferences')}
+        </FooterAction>
+      </CardFooterNote>
+    </RecipientShell>
   );
 }

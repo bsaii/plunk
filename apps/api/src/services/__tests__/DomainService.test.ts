@@ -18,6 +18,11 @@ describe('DomainService', () => {
       status: 'Success',
       tokens: ['token1', 'token2', 'token3'],
     });
+    // DomainService swallows failures from these two, so an unmocked call is invisible
+    // in the results while still hitting AWS on every run — and for anyone whose .env
+    // holds real credentials it would mutate a live SES account.
+    vi.spyOn(SESService, 'deleteIdentity').mockResolvedValue(undefined);
+    vi.spyOn(SESService, 'disableFeedbackForwarding').mockResolvedValue(undefined);
   });
 
   // ========================================
@@ -447,6 +452,24 @@ describe('DomainService', () => {
       });
 
       await expect(DomainService.removeDomain(domain.id)).rejects.toThrow(/3 template/i);
+    });
+  });
+
+  // ========================================
+  // CHECK SUBDOMAIN OF DISABLED ROOT
+  // ========================================
+  describe('checkSubdomainOfDisabledRoot', () => {
+    it.each([
+      ['example.com', 'mail.example.com'],
+      ['example.com.br', 'mail.example.com.br'],
+      ['example.co.uk', 'mail.example.co.uk'],
+    ])('blocks subdomains of %s when its project is disabled', async (root, subdomain) => {
+      const project = await factories.createProject({disabled: true});
+      await factories.createDomain({projectId: project.id, domain: root});
+
+      const result = await DomainService.checkSubdomainOfDisabledRoot(subdomain);
+
+      expect(result).toEqual({blocked: true, projectName: project.name, projectId: project.id});
     });
   });
 

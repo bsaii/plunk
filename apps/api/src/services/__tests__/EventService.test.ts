@@ -9,7 +9,11 @@ import {factories, getPrismaClient} from '../../../../../test/helpers';
 vi.mock('../../database/redis', () => {
   const store = new Map<string, {value: string; expiry?: number}>();
   return {
+    // QueueService builds its BullMQ connection options from this at import
+    getBullMqRedisOptions: vi.fn(() => ({})),
     redis: {
+      // ContactFieldService registers its Lua scripts at import
+      defineCommand: vi.fn(),
       get: vi.fn(async (key: string) => {
         const item = store.get(key);
         if (!item) return null;

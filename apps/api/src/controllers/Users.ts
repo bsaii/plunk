@@ -1,19 +1,31 @@
 import {randomBytes} from 'node:crypto';
 
 import {Controller, Delete, Get, Middleware, Patch, Post, Put} from '@overnightjs/core';
-import {BillingLimitSchemas, ProjectSchemas, UtilitySchemas} from '@plunk/shared';
+import {BillingLimitSchemas, ProjectSchemas, UserSchemas, UtilitySchemas} from '@plunk/shared';
 import type {NextFunction, Request, Response} from 'express';
 
-import {DASHBOARD_URI, STRIPE_ENABLED, STRIPE_PRICE_EMAIL_USAGE, STRIPE_PRICE_ONBOARDING} from '../app/constants.js';
+import {
+  DASHBOARD_URI,
+  PASSWORD_CHANGE_RATE_LIMIT,
+  PASSWORD_CHANGE_RATE_WINDOW,
+  PLUNK_ENABLED,
+  STRIPE_ENABLED,
+  STRIPE_PRICE_EMAIL_USAGE,
+} from '../app/constants.js';
 import {stripe} from '../app/stripe.js';
 import {prisma} from '../database/prisma.js';
-import {ErrorCode, HttpException, NotAuthenticated, NotFound} from '../exceptions/index.js';
+import {redis} from '../database/redis.js';
+import {BadRequest, ErrorCode, HttpException, NotAuthenticated, NotFound, RateLimitError} from '../exceptions/index.js';
 import {isAuthenticated, requireEmailVerified} from '../middleware/auth.js';
+import {AuthService} from '../services/AuthService.js';
 import {BillingLimitService} from '../services/BillingLimitService.js';
+import {VERIFICATION_AMOUNT} from '../services/CardVerificationService.js';
 import {MembershipService} from '../services/MembershipService.js';
 import {NtfyService} from '../services/NtfyService.js';
+import {OutstandingInvoiceService} from '../services/OutstandingInvoiceService.js';
 import {SecurityService} from '../services/SecurityService.js';
 import {UserService} from '../services/UserService.js';
+import {Keys} from '../services/keys.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 import signale from 'signale';
 
@@ -35,7 +47,133 @@ export class Users {
       throw new NotAuthenticated();
     }
 
-    return res.status(200).json({id: me.id, email: me.email});
+    return res.status(200).json({
+      id: me.id,
+      email: me.email,
+      type: me.type,
+      emailVerified: me.emailVerified,
+      // Whether the dashboard should ask this user to verify. Mirrors requireEmailVerified:
+      // a self-host without platform email configured can never send a verification mail, so
+      // an unverified account there is not something the user can act on -- and nothing gates
+      // on it either.
+      emailVerificationRequired: PLUNK_ENABLED && me.type === 'PASSWORD' && !me.emailVerified,
+      createdAt: me.createdAt,
+    });
+  }
+
+  @Post('@me/password')
+  @Middleware([isAuthenticated, requireEmailVerified])
+  @CatchAsync
+  public async changePassword(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+
+    if (!auth.userId) {
+      throw new NotAuthenticated();
+    }
+
+    const {currentPassword, newPassword} = UserSchemas.changePassword.parse(req.body);
+
+    const rateLimitKey = Keys.User.passwordChangeRateLimit(auth.userId);
+    const attempts = await redis.get(rateLimitKey);
+
+    if (attempts && parseInt(attempts) >= PASSWORD_CHANGE_RATE_LIMIT) {
+      throw new RateLimitError('Too many password change attempts. Please try again later.');
+    }
+
+    // Read straight from the database: UserService.id is Redis-cached for an hour, and a
+    // stale entry here would mean checking the old hash.
+    const user = await prisma.user.findUnique({where: {id: auth.userId}});
+
+    if (!user) {
+      throw new NotAuthenticated();
+    }
+
+    if (user.type !== 'PASSWORD' || !user.password) {
+      throw new BadRequest('Your password is managed by your identity provider, so it cannot be changed here');
+    }
+
+    // Count the attempt before verifying, so a wrong guess is what the limit actually bounds.
+    if (attempts) {
+      await redis.incr(rateLimitKey);
+    } else {
+      await redis.setex(rateLimitKey, PASSWORD_CHANGE_RATE_WINDOW, '1');
+    }
+
+    const verified = await AuthService.verifyHash(currentPassword, user.password);
+
+    if (!verified) {
+      throw new BadRequest('Current password is incorrect');
+    }
+
+    await prisma.user.update({
+      where: {id: user.id},
+      data: {password: await AuthService.generateHash(newPassword)},
+    });
+
+    // UserService caches the user under both keys; a stale copy would keep the old hash alive.
+    await redis.del(Keys.User.id(user.id));
+    await redis.del(Keys.User.email(user.email));
+    await redis.del(rateLimitKey);
+
+    return res.status(200).json({success: true, message: 'Password changed successfully'});
+  }
+
+  /**
+   * Delete the authenticated user's account.
+   *
+   * Deliberately not behind `requireEmailVerified`: someone who signed up with a typo'd
+   * address can never verify it, and the dashboard bounces every EMAIL_VERIFICATION_REQUIRED
+   * response to the verification page, which would leave that account impossible to remove.
+   */
+  @Delete('@me')
+  @Middleware([isAuthenticated])
+  @CatchAsync
+  public async deleteAccount(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+
+    if (!auth.userId) {
+      throw new NotAuthenticated();
+    }
+
+    const user = await prisma.user.findUnique({
+      where: {id: auth.userId},
+      select: {id: true, email: true},
+    });
+
+    if (!user) {
+      throw new NotAuthenticated();
+    }
+
+    // The authoritative gate. The dashboard checks this too, but only to explain what is
+    // blocking deletion -- this is the check that decides.
+    const memberships = await prisma.membership.count({where: {userId: user.id}});
+
+    if (memberships > 0) {
+      throw new BadRequest(
+        'You are still a member of at least one project. Leave or delete every project before deleting your account.',
+      );
+    }
+
+    await prisma.$transaction(async tx => {
+      // ApiRequest.userId is a plain column with no foreign key, so these audit rows would
+      // otherwise keep pointing at a user that no longer exists. Keep the log, drop the identity.
+      await tx.apiRequest.updateMany({
+        where: {userId: user.id},
+        data: {userId: null},
+      });
+
+      await tx.user.delete({where: {id: user.id}});
+    });
+
+    await redis.del(Keys.User.id(user.id));
+    await redis.del(Keys.User.email(user.email));
+
+    await NtfyService.notifyUserDeleted(user.email, user.id);
+
+    return res
+      .status(200)
+      .cookie(UserService.COOKIE_NAME, '', UserService.cookieOptions(new Date()))
+      .json({success: true, message: 'Account deleted successfully'});
   }
 
   @Get('@me/projects')
@@ -190,19 +328,21 @@ export class Users {
       return res.status(400).json({error: 'Project already has a subscription'});
     }
 
-    // Build line items for subscription
-    const lineItems = [];
-
-    // Add one-time onboarding fee if configured
-    if (STRIPE_PRICE_ONBOARDING) {
-      lineItems.push({price: STRIPE_PRICE_ONBOARDING, quantity: 1});
+    // A fresh subscription must not be a way around old debt. Send the customer to pay it
+    // instead; `invoice.paid` lifts a payment pause once nothing is left outstanding.
+    if (project.customer) {
+      const [outstanding] = await OutstandingInvoiceService.list(project.customer);
+      if (outstanding?.hosted_invoice_url) {
+        return res.status(200).json({url: outstanding.hosted_invoice_url, outstandingInvoice: true});
+      }
     }
 
-    // Add metered pricing for pay-per-email (required)
+    // Metered pay-per-email is the only line item. Nothing is due at Checkout; the single
+    // activation charge runs off-session afterwards (see CardVerificationService).
     if (!STRIPE_PRICE_EMAIL_USAGE) {
       return res.status(500).json({error: 'Usage-based pricing not configured. Set STRIPE_PRICE_EMAIL_USAGE.'});
     }
-    lineItems.push({price: STRIPE_PRICE_EMAIL_USAGE}); // No quantity for metered items
+    const lineItems = [{price: STRIPE_PRICE_EMAIL_USAGE}]; // No quantity for metered items
 
     // Calculate billing cycle anchor to first day of next month
     // This ensures all subscriptions renew on the 1st of each month
@@ -222,13 +362,15 @@ export class Users {
     }
 
     // Create checkout session
-    // Note: proration_behavior cannot be set when one-time prices are included
-    // The billing_cycle_anchor alone ensures the subscription is anchored to the 1st of the month
+    // The billing_cycle_anchor ensures the subscription is anchored to the 1st of the month
+    const verificationAmount = (VERIFICATION_AMOUNT / 100).toFixed(2);
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       customer: project.customer ?? undefined, // Use existing customer if available
       client_reference_id: project.id, // Store project ID for webhook
       line_items: lineItems,
+      // Nothing is due today, but the off-session verification charge needs a saved card.
+      payment_method_collection: 'always',
       ...(checkoutCurrency && {currency: checkoutCurrency}),
       custom_fields: [
         {
@@ -240,6 +382,13 @@ export class Users {
       ],
       subscription_data: {
         billing_cycle_anchor: billingCycleAnchor,
+      },
+      // Checkout shows nothing due today, so name the charge that follows here rather than
+      // let it arrive unannounced on the statement.
+      custom_text: {
+        submit: {
+          message: `Right after checkout, we'll make one ${verificationAmount} charge in your billing currency to confirm your card supports monthly billing. It's credited to your account in full and applied to your usage.`,
+        },
       },
       success_url: `${DASHBOARD_URI}/settings?tab=billing&success=true`,
       cancel_url: `${DASHBOARD_URI}/settings?tab=billing&canceled=true`,

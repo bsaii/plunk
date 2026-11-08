@@ -1,6 +1,7 @@
 import {Controller, Delete, Get, Middleware, Post, Put} from '@overnightjs/core';
 import {CampaignAudienceType, CampaignStatus, TemplateType} from '@plunk/db';
 import {CampaignSchemas, UtilitySchemas} from '@plunk/shared';
+import type {CampaignRecipientType} from '@plunk/types';
 import type {NextFunction, Request, Response} from 'express';
 
 import {HttpException} from '../exceptions/index.js';
@@ -9,6 +10,7 @@ import {CampaignService} from '../services/CampaignService.js';
 import {DomainService} from '../services/DomainService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
 import {parseListSort} from '../utils/listSort.js';
+import {assertValidTemplateSyntax} from '../utils/templateValidation.js';
 
 @Controller('campaigns')
 export class Campaigns {
@@ -31,6 +33,8 @@ export class Campaigns {
     if (audienceType === CampaignAudienceType.FILTERED && !audienceCondition) {
       throw new HttpException(400, 'Audience condition is required for FILTERED audience type');
     }
+
+    assertValidTemplateSyntax({subject, body});
 
     // Verify domain ownership and verification
     await DomainService.verifyEmailDomain(from, auth.projectId);
@@ -63,6 +67,7 @@ export class Campaigns {
    * - page, pageSize: pagination
    * - status: filter by CampaignStatus
    * - search: filter by name/subject/from
+   * - archived: 'true' lists the archive instead of the active campaigns (default: false)
    * - sort: name | createdAt | updatedAt (default: createdAt)
    * - dir: asc | desc (default: desc)
    */
@@ -73,6 +78,9 @@ export class Campaigns {
     const auth = res.locals.auth;
     const status = req.query.status as CampaignStatus | undefined;
     const search = typeof req.query.search === 'string' ? req.query.search.trim() || undefined : undefined;
+    // Opt-in only: anything other than the literal 'true' lists active campaigns, so a
+    // malformed value can never accidentally hide a project's whole campaign list.
+    const archived = req.query.archived === 'true';
     const page = parseInt(req.query.page as string) || 1;
     const pageSize = parseInt(req.query.pageSize as string) || 20;
     const sort = parseListSort(req.query.sort, req.query.dir, {field: 'createdAt', direction: 'desc'});
@@ -85,6 +93,7 @@ export class Campaigns {
     const result = await CampaignService.list(auth.projectId, {
       status,
       search,
+      archived,
       page,
       pageSize,
       sort,
@@ -97,13 +106,14 @@ export class Campaigns {
    * Apply a bulk operation to multiple campaigns at once.
    * POST /campaigns/bulk-update
    *
-   * Currently supports `{ids: string[], delete: true}` for bulk delete. The
-   * schema is intentionally open-ended so future bulk operations can stack on
-   * the same endpoint.
+   * Supports `{ids: string[], delete: true}` for bulk delete and
+   * `{ids: string[], archived: boolean}` for bulk archive / restore, one mode per
+   * request. The schema is intentionally open-ended so further bulk operations can
+   * stack on the same endpoint.
    *
-   * Atomicity: the underlying service wraps the ownership check, the
-   * draft-only guard, and the delete in a single Prisma transaction, so a
-   * partial bulk delete is not possible.
+   * Atomicity: the underlying service wraps the ownership check, the status guard
+   * (draft-only for delete, not-in-flight for archive), and the write in a single
+   * Prisma transaction, so a partially-applied bulk operation is not possible.
    *
    * NOTE: This must be defined BEFORE the :id route to avoid conflicts.
    */
@@ -163,6 +173,8 @@ export class Campaigns {
     if (audienceType === CampaignAudienceType.FILTERED && audienceCondition === undefined) {
       throw new HttpException(400, 'Audience condition is required for FILTERED audience type');
     }
+
+    assertValidTemplateSyntax({subject, body});
 
     // Verify domain ownership and verification if 'from' is being updated
     if (from) {
@@ -229,6 +241,50 @@ export class Campaigns {
   }
 
   /**
+   * Archive a campaign, hiding it from the default campaign list.
+   * POST /campaigns/:id/archive
+   *
+   * Reversible and lossless: nothing about the campaign's status, stats or emails
+   * changes, and GET /campaigns/:id keeps returning it. Rejected with a 400 for
+   * SCHEDULED and SENDING campaigns, which still need attention.
+   */
+  @Post(':id/archive')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  private async archive(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    const {id} = UtilitySchemas.id.parse(req.params);
+
+    const campaign = await CampaignService.setArchived(auth.projectId, id!, true);
+
+    return res.json({
+      success: true,
+      data: campaign,
+      message: 'Campaign archived successfully',
+    });
+  }
+
+  /**
+   * Restore an archived campaign back to the default list.
+   * POST /campaigns/:id/unarchive
+   */
+  @Post(':id/unarchive')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  private async unarchive(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    const {id} = UtilitySchemas.id.parse(req.params);
+
+    const campaign = await CampaignService.setArchived(auth.projectId, id!, false);
+
+    return res.json({
+      success: true,
+      data: campaign,
+      message: 'Campaign restored successfully',
+    });
+  }
+
+  /**
    * Send or schedule a campaign
    * POST /campaigns/:id/send
    */
@@ -262,6 +318,12 @@ export class Campaigns {
   /**
    * Cancel a campaign
    * POST /campaigns/:id/cancel
+   *
+   * A campaign that had not sent anything returns to DRAFT rather than CANCELLED --
+   * see `CampaignService.cancel`. When it was stopped mid-send that revert is
+   * asynchronous, so the response carries `revertPending` and the campaign is still
+   * CANCELLED here; the client polls for the promotion rather than being told a draft
+   * exists before it does.
    */
   @Post(':id/cancel')
   @Middleware([requireAuth, requireEmailVerified])
@@ -270,12 +332,17 @@ export class Campaigns {
     const auth = res.locals.auth;
     const {id} = UtilitySchemas.id.parse(req.params);
 
-    const campaign = await CampaignService.cancel(auth.projectId, id!);
+    const {campaign, revertPending} = await CampaignService.cancel(auth.projectId, id!);
 
     return res.json({
       success: true,
       data: campaign,
-      message: 'Campaign cancelled successfully',
+      revertPending,
+      message: revertPending
+        ? 'Campaign stopped before any email was sent; it returns to draft once its unsent emails are cleared'
+        : campaign.status === CampaignStatus.DRAFT
+          ? 'Campaign stopped before any email was sent and returned to draft'
+          : 'Campaign cancelled successfully',
     });
   }
 
@@ -296,6 +363,35 @@ export class Campaigns {
       success: true,
       data: stats,
     });
+  }
+
+  /**
+   * List the recipients a campaign lost to a bounce, a spam complaint or an opt-out.
+   * GET /campaigns/:id/recipients?type=bounced|complained|unsubscribed&cursor=&limit=
+   *
+   * Cursor-paginated rather than offset-paginated: a campaign can carry tens of
+   * thousands of bounces, and OFFSET would make each page cost more than the last.
+   * `total` comes off the campaign row, so it always matches the figure on the results
+   * panel that this list is opened from.
+   */
+  @Get(':id/recipients')
+  @Middleware([requireAuth, requireEmailVerified])
+  @CatchAsync
+  private async recipients(req: Request, res: Response, _next: NextFunction) {
+    const auth = res.locals.auth;
+    const {id} = UtilitySchemas.id.parse(req.params);
+
+    const type: CampaignRecipientType =
+      req.query.type === 'complained' || req.query.type === 'unsubscribed' ? req.query.type : 'bounced';
+    // Capped at 100 for the same reason every other list here is: one page is what a
+    // reader can look at, and an uncapped limit turns a cheap range scan into a way to
+    // pull a campaign's whole bounce list in one request.
+    const limit = Math.min(Number.parseInt(req.query.limit as string, 10) || 50, 100);
+    const cursor = req.query.cursor as string | undefined;
+
+    const result = await CampaignService.listRecipients(auth.projectId, id!, type, {limit, cursor});
+
+    return res.json({success: true, ...result});
   }
 
   /**

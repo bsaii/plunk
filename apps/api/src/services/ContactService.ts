@@ -1,9 +1,18 @@
 import {type Contact, Prisma} from '@plunk/db';
-import type {CursorPaginatedResponse, FilterCondition, FilterGroup} from '@plunk/types';
+import type {
+  BulkContactActionSelector,
+  ContactSubscriptionStatus,
+  CursorPaginatedResponse,
+  FilterCondition,
+  FilterGroup,
+  SnoozeDuration,
+} from '@plunk/types';
 import {toPrismaJson} from '@plunk/types';
+import signale from 'signale';
 
 import {prisma} from '../database/prisma.js';
 import {HttpException} from '../exceptions/index.js';
+import {ContactFieldService} from './ContactFieldService.js';
 import {EventService} from './EventService.js';
 
 export class ContactService {
@@ -23,6 +32,59 @@ export class ContactService {
   }
 
   /**
+   * Build the where-clause for the contacts list filters: the email search plus the
+   * subscription status. Shared by the list and the select-all bulk actions so "all matching"
+   * always means exactly the rows the dashboard shows.
+   *
+   * `snoozed` is derived, not stored -- it is `subscribed = false` with a snooze date still
+   * set. `unsubscribed` therefore has to exclude snoozed contacts explicitly, or the two
+   * filters would overlap and the dashboard's counts would not add up.
+   *
+   * Falls back to the legacy `subscribed` boolean when no status is given.
+   */
+  public static buildFilterWhere(
+    projectId: string,
+    filter: {search?: string; status?: ContactSubscriptionStatus; subscribed?: boolean} = {},
+  ): Prisma.ContactWhereInput {
+    return {
+      projectId,
+      ...(filter.search ? {email: {contains: filter.search, mode: 'insensitive' as const}} : {}),
+      ...this.buildStatusWhere(filter.status, filter.subscribed),
+    };
+  }
+
+  /**
+   * Where-clause for a "select all matching" selector: the list filters, minus the rows the
+   * user unticked.
+   */
+  public static buildQueryWhere(
+    projectId: string,
+    selector: Extract<BulkContactActionSelector, {mode: 'query'}>,
+  ): Prisma.ContactWhereInput {
+    const excludeIds = selector.excludeIds ?? [];
+    return {
+      ...this.buildFilterWhere(projectId, selector.filter),
+      ...(excludeIds.length > 0 ? {id: {notIn: excludeIds}} : {}),
+    };
+  }
+
+  private static buildStatusWhere(
+    status?: ContactSubscriptionStatus,
+    subscribed?: boolean,
+  ): Prisma.ContactWhereInput {
+    switch (status) {
+      case 'subscribed':
+        return {subscribed: true};
+      case 'snoozed':
+        return {subscribed: false, snoozedUntil: {not: null}};
+      case 'unsubscribed':
+        return {subscribed: false, snoozedUntil: null};
+      default:
+        return subscribed !== undefined ? {subscribed} : {};
+    }
+  }
+
+  /**
    * Get all contacts for a project with cursor-based pagination
    * Uses cursor pagination for better performance with large datasets
    */
@@ -32,25 +94,23 @@ export class ContactService {
     cursor?: string,
     search?: string,
     options?: {
-      /** Filter by subscription state. Backed by the `(projectId, subscribed)` index. */
+      /**
+       * Filter by subscription state, including the derived `snoozed` state.
+       * The `subscribed` and `unsubscribed` branches are backed by the
+       * `(projectId, subscribed)` index; `snoozed` narrows that further on `snoozedUntil`.
+       */
+      status?: ContactSubscriptionStatus;
+      /**
+       * Legacy boolean filter, kept so existing `?subscribed=true|false` callers keep working.
+       * Ignored when `status` is given.
+       */
       subscribed?: boolean;
       /** Sortable columns. `email` is covered by the `(projectId, email)` unique index. */
       sort?: 'email' | 'createdAt';
       dir?: 'asc' | 'desc';
     },
   ): Promise<CursorPaginatedResponse<Contact>> {
-    const where: Prisma.ContactWhereInput = {
-      projectId,
-      ...(search
-        ? {
-            email: {
-              contains: search,
-              mode: 'insensitive' as const,
-            },
-          }
-        : {}),
-      ...(options?.subscribed !== undefined ? {subscribed: options.subscribed} : {}),
-    };
+    const where = this.buildFilterWhere(projectId, {search, status: options?.status, subscribed: options?.subscribed});
 
     // The chosen sort column leads; `id` is always the stable tiebreaker the
     // cursor (`{id}`) keys off, so keyset pagination stays correct under any
@@ -145,7 +205,7 @@ export class ContactService {
     data: {email: string; data?: Prisma.JsonValue; subscribed?: boolean},
   ): Promise<Contact> {
     try {
-      return await prisma.contact.create({
+      const contact = await prisma.contact.create({
         data: {
           projectId,
           email: this.normalizeEmail(data.email),
@@ -153,6 +213,10 @@ export class ContactService {
           subscribed: data.subscribed ?? true,
         },
       });
+
+      await ContactFieldService.recordKeys(projectId, ContactFieldService.keysOf(data.data));
+
+      return contact;
     } catch (error) {
       // Check if this is a unique constraint violation (P2002)
       if (error instanceof Error && 'code' in error && error.code === 'P2002') {
@@ -232,6 +296,9 @@ export class ContactService {
     }
     if (data.subscribed !== undefined) {
       updateData.subscribed = data.subscribed;
+      // An explicit subscription decision outranks a snooze in both directions: resubscribing
+      // ends it early, and unsubscribing makes it permanent. See SNOOZE_CLEARED_ON_WRITE.
+      updateData.snoozedUntil = null;
     }
 
     // Track subscription status change
@@ -243,6 +310,10 @@ export class ContactService {
         where: {id: contactId},
         data: updateData,
       });
+
+      if (data.data !== undefined) {
+        await ContactFieldService.recordKeys(projectId, ContactFieldService.keysOf(updated.data));
+      }
 
       // Track subscription event if status changed
       if (isSubscriptionChanging) {
@@ -318,9 +389,13 @@ export class ContactService {
           where: {id: existing.id},
           data: {
             data: Object.keys(mergedData).length > 0 ? toPrismaJson(mergedData) : Prisma.JsonNull,
-            ...(subscribed !== undefined ? {subscribed} : {}),
+            // An explicit subscription decision ends any snooze, either way.
+            // See SNOOZE_CLEARED_ON_WRITE.
+            ...(subscribed !== undefined ? {subscribed, snoozedUntil: null} : {}),
           },
         });
+
+        await ContactFieldService.recordKeys(projectId, Object.keys(mergedData));
 
         // Track subscription event if status changed
         if (isSubscriptionChanging) {
@@ -341,7 +416,7 @@ export class ContactService {
       }
     } else {
       try {
-        return await prisma.contact.create({
+        const created = await prisma.contact.create({
           data: {
             projectId,
             email: normalizedEmail,
@@ -349,6 +424,10 @@ export class ContactService {
             subscribed: subscribed ?? defaultSubscribed,
           },
         });
+
+        await ContactFieldService.recordKeys(projectId, Object.keys(mergedData));
+
+        return created;
       } catch (error) {
         // Provide helpful error message for database/validation issues
         throw new HttpException(
@@ -427,12 +506,13 @@ export class ContactService {
    * Get project by contact ID
    * Used to fetch project settings for public endpoints
    */
-  public static async getProjectByContactId(contactId: string): Promise<{language: string} | null> {
+  public static async getProjectByContactId(contactId: string): Promise<{name: string; language: string} | null> {
     const contact = await prisma.contact.findUnique({
       where: {id: contactId},
       select: {
         project: {
           select: {
+            name: true,
             language: true,
           },
         },
@@ -443,136 +523,302 @@ export class ContactService {
   }
 
   /**
-   * PUBLIC: Subscribe a contact
+   * Resolve the email a recipient acted from, as claimed by the `e` parameter on
+   * an unsubscribe or manage link.
+   *
+   * The claim is attacker-controlled — the links are public and unauthenticated —
+   * so it is only trusted after confirming the email belongs to this contact.
+   * A claim that does not check out is dropped rather than rejected: the
+   * subscription change itself is governed by the contact id in the path and
+   * must still go through, so a bad `e` costs attribution, not the opt-out.
    */
-  public static async subscribe(contactId: string): Promise<Contact> {
+  private static async resolveSourceEmail(
+    contactId: string,
+    emailId?: string,
+  ): Promise<{id: string; campaignId: string | null; suppressed: boolean} | undefined> {
+    if (!emailId) {
+      return undefined;
+    }
+
+    const email = await prisma.email.findUnique({
+      where: {id: emailId},
+      select: {id: true, contactId: true, campaignId: true, bouncedAt: true, complainedAt: true},
+    });
+
+    if (email?.contactId !== contactId) {
+      return undefined;
+    }
+
+    return {
+      id: email.id,
+      campaignId: email.campaignId,
+      suppressed: email.bouncedAt !== null || email.complainedAt !== null,
+    };
+  }
+
+  /**
+   * Record an opt-out against the campaign email it came from: stamp the email's
+   * `unsubscribedAt` and add one to the campaign's unsubscribe count.
+   *
+   * The two move together, in one transaction, and the count only moves when the stamp
+   * lands. That keeps the stamped rows -- the list the campaign page drills into --
+   * identical to the figure it is opened from, and makes a repeat opt-out from the same
+   * email (a second click on the hosted page, a re-snooze) count once.
+   *
+   * Never allowed to fail the opt-out that triggered it: a stats write is not worth a
+   * 5xx on a public unsubscribe endpoint, which would leave a mailbox provider retrying
+   * a request that already took effect. A failure is logged and the opt-out stands
+   * uncounted.
+   */
+  private static async recordCampaignUnsubscribe(emailId: string, campaignId: string): Promise<void> {
+    try {
+      await prisma.$transaction(async tx => {
+        const {count} = await tx.email.updateMany({
+          where: {id: emailId, unsubscribedAt: null},
+          data: {unsubscribedAt: new Date()},
+        });
+
+        if (count === 1) {
+          await tx.campaign.update({
+            where: {id: campaignId},
+            data: {unsubscribedCount: {increment: 1}},
+          });
+        }
+      });
+    } catch (error) {
+      signale.warn(`[CONTACT] Failed to record unsubscribe for campaign ${campaignId}:`, error);
+    }
+  }
+
+  /**
+   * PUBLIC: Subscribe a contact
+   *
+   * @param source - Optional originating email, for attributing the change in
+   *                 the activity feed. See {@link resolveSourceEmail}.
+   */
+  public static async subscribe(contactId: string, source?: {emailId?: string}): Promise<Contact> {
+    const sourceEmail = await this.resolveSourceEmail(contactId, source?.emailId);
+
     const contact = await prisma.contact.update({
       where: {id: contactId},
-      data: {subscribed: true},
+      // Resubscribing ends a snooze early. See SNOOZE_CLEARED_ON_WRITE.
+      data: {subscribed: true, snoozedUntil: null},
     });
 
     // Track subscription event
-    await EventService.trackEvent(contact.projectId, 'contact.subscribed', contactId);
+    await EventService.trackEvent(contact.projectId, 'contact.subscribed', contactId, sourceEmail?.id);
 
     return contact;
   }
 
   /**
    * PUBLIC: Unsubscribe a contact
+   *
+   * @param source - Optional originating email, for attributing the change in
+   *                 the activity feed and counting it against the campaign that
+   *                 prompted it. See {@link resolveSourceEmail}.
    */
-  public static async unsubscribe(contactId: string): Promise<Contact> {
+  public static async unsubscribe(contactId: string, source?: {emailId?: string}): Promise<Contact> {
+    const sourceEmail = await this.resolveSourceEmail(contactId, source?.emailId);
+
     const contact = await prisma.contact.update({
       where: {id: contactId},
-      data: {subscribed: false},
+      // Unsubscribing on top of a snooze makes it permanent -- the recipient asked to stop,
+      // not to pause, and the sweep must never undo that. See SNOOZE_CLEARED_ON_WRITE.
+      data: {subscribed: false, snoozedUntil: null},
     });
 
     // Track unsubscription event
-    await EventService.trackEvent(contact.projectId, 'contact.unsubscribed', contactId);
+    await EventService.trackEvent(contact.projectId, 'contact.unsubscribed', contactId, sourceEmail?.id);
+
+    // Count it against the campaign the recipient opted out from. Suppressed
+    // emails are skipped: a bounce or complaint unsubscribes the contact too,
+    // and `bouncedCount` already reports those.
+    if (sourceEmail?.campaignId && !sourceEmail.suppressed) {
+      await this.recordCampaignUnsubscribe(sourceEmail.id, sourceEmail.campaignId);
+    }
 
     return contact;
   }
 
   /**
-   * Get all available contact fields for a project
-   * Returns both standard fields and custom fields from the data JSON column
-   * Now includes type information inferred from actual data
+   * Move a date forward by a snooze window, in calendar units.
    *
-   * @param projectId - The project ID to filter contacts
-   * @returns Array of field objects with name and type
+   * Calendar arithmetic rather than a fixed number of milliseconds so "1 month" lands on the
+   * same day of the next month regardless of its length, and so a snooze spanning a DST
+   * change still ends at the same wall-clock time. `setMonth` clamps overflow itself
+   * (31 January + 1 month = 28/29 February), which is the behaviour a recipient expects.
    */
-  public static async getAvailableFields(
-    projectId: string,
-  ): Promise<Array<{field: string; type: 'string' | 'number' | 'boolean' | 'date'; coverage: number}>> {
-    // Get total contact count for coverage calculation
-    const totalContacts = await prisma.contact.count({
-      where: {projectId},
+  private static addSnoozeWindow(from: Date, duration: SnoozeDuration): Date {
+    const until = new Date(from.getTime());
+
+    switch (duration) {
+      case '2_weeks':
+        until.setDate(until.getDate() + 14);
+        break;
+      case '1_month':
+        until.setMonth(until.getMonth() + 1);
+        break;
+      case '6_months':
+        until.setMonth(until.getMonth() + 6);
+        break;
+      case '1_year':
+        until.setFullYear(until.getFullYear() + 1);
+        break;
+    }
+
+    return until;
+  }
+
+  /**
+   * PUBLIC: Snooze a contact -- unsubscribe them until a date, then resubscribe automatically.
+   *
+   * ## SNOOZE_CLEARED_ON_WRITE
+   *
+   * A snooze is `subscribed = false` plus a `snoozedUntil` date. It is deliberately not a
+   * third subscription state: every send path already filters `subscribed = true`, so a
+   * snoozed contact is suppressed correctly without any of them knowing this feature exists.
+   *
+   * The price of that is one invariant, and it is the only thing about snoozing that can
+   * actually hurt someone:
+   *
+   * > Every write to `subscribed` must also write `snoozedUntil: null`.
+   *
+   * Otherwise a contact who is snoozed when something else suppresses them -- a hard bounce,
+   * a spam complaint, an operator's bulk unsubscribe -- would be resubscribed by the sweep
+   * when the old date passed, and mailed again. The bounce and complaint cases are the severe
+   * ones: resurrecting a suppressed address is exactly the reputation damage suppression
+   * exists to prevent.
+   *
+   * The call sites that uphold this, all marked with a reference to this comment:
+   * `update`, `upsert`, `subscribe`, `unsubscribe`, `bulkSubscribe`, `bulkUnsubscribe`,
+   * the three SES suppression branches in `Webhooks`, and the workflow `UPDATE_CONTACT` step.
+   * `create` needs nothing -- a new contact's `snoozedUntil` is already null.
+   *
+   * Re-snoozing is allowed and simply moves the date; it does not re-count against the
+   * campaign, matching the repeat-click guard on the one-click unsubscribe endpoint.
+   *
+   * @param source - Optional originating email, for attributing the change in the activity
+   *                 feed and counting it against the campaign that prompted it.
+   *                 See {@link resolveSourceEmail}.
+   */
+  public static async snooze(
+    contactId: string,
+    duration: SnoozeDuration,
+    source?: {emailId?: string},
+  ): Promise<Contact> {
+    const sourceEmail = await this.resolveSourceEmail(contactId, source?.emailId);
+
+    // Read before write: whether this contact was still subscribed decides if the snooze
+    // counts against the campaign, and the row has to be confirmed to exist anyway.
+    const existing = await prisma.contact.findUnique({
+      where: {id: contactId},
+      select: {subscribed: true},
     });
 
-    // Standard fields with known types (always 100% coverage)
-    const standardFields = [
-      {field: 'email', type: 'string' as const, coverage: 100},
-      {field: 'subscribed', type: 'boolean' as const, coverage: 100},
-      {field: 'createdAt', type: 'date' as const, coverage: 100},
-      {field: 'updatedAt', type: 'date' as const, coverage: 100},
-    ];
+    if (!existing) {
+      throw new HttpException(404, 'Contact not found');
+    }
 
-    // Get custom fields from the data JSON column with type inference and coverage
-    // Use raw SQL to extract all keys, sample values, and contact counts from the JSON data column
-    const result = await prisma.$queryRaw<
-      Array<{key: string; sample_value: string; json_type: string; contact_count: bigint}>
-    >`
-      WITH field_keys AS (
-        SELECT DISTINCT jsonb_object_keys(data) as key
-        FROM contacts
-        WHERE
-          "projectId" = ${projectId}
-          AND data IS NOT NULL
-          AND jsonb_typeof(data) = 'object'
-      ),
-      field_samples AS (
-        SELECT
-          fk.key,
-          jsonb_typeof(c.data->fk.key) as json_type,
-          (c.data->>fk.key) as sample_value
-        FROM field_keys fk
-        CROSS JOIN LATERAL (
-          SELECT data
-          FROM contacts
-          WHERE
-            "projectId" = ${projectId}
-            AND data ? fk.key
-            AND data->fk.key IS NOT NULL
-          LIMIT 1
-        ) c
-      ),
-      field_counts AS (
-        SELECT
-          fk.key,
-          COUNT(*) as contact_count
-        FROM field_keys fk
-        JOIN contacts c ON c."projectId" = ${projectId}
-          AND c.data ? fk.key
-          AND c.data->fk.key IS NOT NULL
-        GROUP BY fk.key
-      )
-      SELECT
-        fs.key,
-        fs.sample_value,
-        fs.json_type,
-        fc.contact_count
-      FROM field_samples fs
-      JOIN field_counts fc ON fc.key = fs.key
-    `;
+    const snoozedUntil = this.addSnoozeWindow(new Date(), duration);
 
-    // Infer types from JSON types and sample values, calculate coverage
-    const customFields = result.map(row => {
-      let type: 'string' | 'number' | 'boolean' | 'date' = 'string';
+    const contact = await prisma.contact.update({
+      where: {id: contactId},
+      data: {subscribed: false, snoozedUntil},
+    });
 
-      // PostgreSQL jsonb_typeof returns: "object", "array", "string", "number", "boolean", "null"
-      if (row.json_type === 'boolean') {
-        type = 'boolean';
-      } else if (row.json_type === 'number') {
-        type = 'number';
-      } else if (row.json_type === 'string' && row.sample_value) {
-        // Try to detect dates (ISO 8601 format)
-        const dateRegex = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d{3})?Z?)?$/;
-        if (dateRegex.test(row.sample_value)) {
-          type = 'date';
+    // Reuses `contact.unsubscribed` rather than a new event name, so existing workflows,
+    // WAIT_FOR_EVENT steps and the activity feed pick a snooze up with no changes. The
+    // `reason` field is what lets a sender tell the two apart.
+    await EventService.trackEvent(contact.projectId, 'contact.unsubscribed', contactId, sourceEmail?.id, {
+      reason: 'snooze',
+      duration,
+      snoozedUntil: snoozedUntil.toISOString(),
+    });
+
+    // A snooze is a deliberate opt-out this campaign caused, so it counts -- otherwise a
+    // campaign that drives people away would look clean whenever they chose to pause instead
+    // of leave. Only on the first opt-out: re-snoozing an already-unsubscribed contact must
+    // not count twice. Suppressed emails are skipped, as in `unsubscribe`.
+    if (existing.subscribed && sourceEmail?.campaignId && !sourceEmail.suppressed) {
+      await this.recordCampaignUnsubscribe(sourceEmail.id, sourceEmail.campaignId);
+    }
+
+    return contact;
+  }
+
+  /**
+   * Resubscribe every contact whose snooze has run out. Driven by the snooze sweep job.
+   *
+   * Batched and capped rather than a single `updateMany`, because waking a contact is not a
+   * cheap write: each one emits `contact.subscribed`, and every one of those runs the workflow
+   * trigger match and the WAIT_FOR_EVENT resume. A campaign that snoozed thousands of people
+   * on the same day would otherwise wake them in one burst and flood the workflow engine.
+   * Capping the run spreads that over consecutive sweeps; the remainder simply waits for the
+   * next one, which costs minutes on a window measured in weeks to years.
+   *
+   * Ordered by `snoozedUntil` so the longest-overdue contacts are always woken first and no
+   * one can be starved by a continuous stream of newly-due snoozes.
+   *
+   * The update runs before the events. If the process dies between the two, the contact is
+   * awake but no event fired -- the same trade the bulk subscription paths already make, and
+   * the safe direction: a missing event is a reporting gap, while an unwoken contact would be
+   * silently suppressed forever.
+   *
+   * @returns How many contacts were resubscribed.
+   */
+  public static async resumeExpiredSnoozes(options?: {batchSize?: number; maxPerRun?: number}): Promise<number> {
+    const batchSize = options?.batchSize ?? 500;
+    const maxPerRun = options?.maxPerRun ?? 5000;
+
+    let resumed = 0;
+
+    while (resumed < maxPerRun) {
+      const due = await prisma.contact.findMany({
+        where: {snoozedUntil: {lte: new Date()}},
+        select: {id: true, projectId: true},
+        orderBy: {snoozedUntil: 'asc'},
+        take: Math.min(batchSize, maxPerRun - resumed),
+      });
+
+      if (due.length === 0) {
+        break;
+      }
+
+      await prisma.contact.updateMany({
+        where: {id: {in: due.map(c => c.id)}},
+        data: {subscribed: true, snoozedUntil: null},
+      });
+
+      // Events are per-project because `trackEvent` resolves workflows per project. Awaited,
+      // unlike the bulk paths: the sweep has no caller waiting on it, and letting a batch's
+      // events finish before the next batch is read keeps the load flat.
+      const byProject = new Map<string, string[]>();
+      for (const contact of due) {
+        const ids = byProject.get(contact.projectId);
+        if (ids) {
+          ids.push(contact.id);
+        } else {
+          byProject.set(contact.projectId, [contact.id]);
         }
       }
 
-      // Calculate coverage percentage
-      const contactCount = Number(row.contact_count);
-      const coverage = totalContacts > 0 ? Math.round((contactCount / totalContacts) * 100) : 0;
+      for (const [projectId, contactIds] of byProject) {
+        await this.trackEventsSequentially(projectId, 'contact.subscribed', contactIds, {
+          reason: 'snooze_expired',
+        });
+      }
 
-      return {
-        field: `data.${row.key}`,
-        type,
-        coverage,
-      };
-    });
+      resumed += due.length;
 
-    return [...standardFields, ...customFields].sort((a, b) => a.field.localeCompare(b.field));
+      // A short batch means the queue is drained; anything else is a full page and there may
+      // be more.
+      if (due.length < batchSize) {
+        break;
+      }
+    }
+
+    return resumed;
   }
 
   /**
@@ -735,6 +981,8 @@ export class ContactService {
         AND data ? ${jsonField}
     `;
 
+    await ContactFieldService.forget(projectId, jsonField);
+
     return {deletedFrom: result};
   }
 
@@ -766,7 +1014,8 @@ export class ContactService {
 
     const result = await prisma.contact.updateMany({
       where: {id: {in: unsubscribedIds}, projectId},
-      data: {subscribed: true},
+      // Resubscribing ends a snooze early. See SNOOZE_CLEARED_ON_WRITE.
+      data: {subscribed: true, snoozedUntil: null},
     });
 
     this.trackEventsSequentially(projectId, 'contact.subscribed', unsubscribedIds).catch(error => {
@@ -789,7 +1038,7 @@ export class ContactService {
   ): Promise<{updated: number; unchanged: number}> {
     const contacts = await prisma.contact.findMany({
       where: {id: {in: contactIds}, projectId},
-      select: {id: true, subscribed: true},
+      select: {id: true, subscribed: true, snoozedUntil: true},
     });
 
     if (contacts.length === 0) {
@@ -799,14 +1048,25 @@ export class ContactService {
     const subscribedIds = contacts.filter(c => c.subscribed).map(c => c.id);
     const unchanged = contacts.length - subscribedIds.length;
 
-    if (subscribedIds.length === 0) {
+    // A snoozed contact is already `subscribed = false`, so it does not flip and is reported
+    // as unchanged -- but its snooze still has to be cleared, or the sweep would resubscribe
+    // someone an operator just unsubscribed. Those ids are written alongside the flips.
+    // See SNOOZE_CLEARED_ON_WRITE.
+    const snoozedIds = contacts.filter(c => !c.subscribed && c.snoozedUntil !== null).map(c => c.id);
+    const idsToWrite = [...subscribedIds, ...snoozedIds];
+
+    if (idsToWrite.length === 0) {
       return {updated: 0, unchanged};
     }
 
-    const result = await prisma.contact.updateMany({
-      where: {id: {in: subscribedIds}, projectId},
-      data: {subscribed: false},
+    await prisma.contact.updateMany({
+      where: {id: {in: idsToWrite}, projectId},
+      data: {subscribed: false, snoozedUntil: null},
     });
+
+    if (subscribedIds.length === 0) {
+      return {updated: 0, unchanged};
+    }
 
     this.trackEventsSequentially(projectId, 'contact.unsubscribed', subscribedIds).catch(error => {
       if (process.env.NODE_ENV !== 'test') {
@@ -814,7 +1074,7 @@ export class ContactService {
       }
     });
 
-    return {updated: result.count, unchanged};
+    return {updated: subscribedIds.length, unchanged};
   }
 
   /**
@@ -886,10 +1146,11 @@ export class ContactService {
     projectId: string,
     eventName: string,
     contactIds: string[],
+    data?: Record<string, unknown>,
   ): Promise<void> {
     for (const contactId of contactIds) {
       try {
-        await EventService.trackEvent(projectId, eventName, contactId);
+        await EventService.trackEvent(projectId, eventName, contactId, undefined, data);
       } catch (error) {
         // Log error but continue processing remaining events
         // Suppress logging in test environments to reduce noise from cleanup race conditions

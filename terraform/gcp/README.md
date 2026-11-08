@@ -1,7 +1,7 @@
 # Plunk — GCP Terraform
 
 Manages `plunk-api`, `plunk-web`, the `plunk-migrate` and `plunk-maintenance` Cloud Run Jobs (the
-latter driven by 5 Cloud Scheduler entries — see "Maintenance jobs" below), and the internal `plunk-worker`
+latter driven by 8 Cloud Scheduler entries — see "Maintenance jobs" below), and the internal `plunk-worker`
 Cloud Run service for Cloud Tasks — plus everything a GCP project needs before any of that can exist: the
 required APIs, the Artifact Registry repo, and every runtime/build service account and IAM binding
 (`services.tf` / `iam.tf`).
@@ -52,24 +52,28 @@ auth on incoming requests; Plunk does its own app-level auth on top of that.
 
 ## Maintenance jobs
 
-The 5 scheduled maintenance sweeps (domain verification, segment counts, and 3 cleanup jobs — API
-request logs, expired idempotency keys, old email bodies) run as a single `plunk-maintenance`
-Cloud Run Job, one image serving all 5 schedules (`maintenance.tf`). Each schedule is its own
+The 8 scheduled maintenance sweeps (domain verification, segment counts, 3 cleanup jobs — API
+request logs, expired idempotency keys, old email bodies — and the snooze, campaign-stats and
+scheduled-email sweeps) run as a single `plunk-maintenance`
+Cloud Run Job, one image serving all 8 schedules (`maintenance.tf`). Each schedule is its own
 `google_cloud_scheduler_job`, authenticated as the dedicated `plunk-scheduler-run` service account,
 calling the Cloud Run Admin API's `projects.locations.jobs.run` method with a per-invocation
 `--task=<name>` container args override — the job's own static template deliberately carries no
 default task, so a direct/manual `gcloud run jobs execute plunk-maintenance` (no override) fails
-loud instead of silently running the wrong sweep. All 5 schedules run in UTC:
+loud instead of silently running the wrong sweep. All 8 schedules run in UTC:
 
 | Task | Schedule (UTC) |
 | --- | --- |
-| `domain-verification` | `*/5 * * * *` (every 5 minutes) |
-| `segment-count` | `*/5 * * * *` (every 5 minutes) |
+| `domain-verification` | `0 * * * *` (hourly) |
+| `segment-count` | `*/15 * * * *` (every 15 minutes) |
 | `api-request-cleanup` | `0 3 * * *` (daily at 03:00) |
 | `idempotency-key-cleanup` | `0 * * * *` (hourly) |
 | `email-body-cleanup` | `0 4 * * *` (daily at 04:00) |
+| `snooze-sweep` | `30 5 * * *` (daily at 05:30) |
+| `campaign-stats-sweep` | `15 */6 * * *` (every 6 hours, at :15) |
+| `scheduled-email-sweep` | `45 * * * *` (hourly, at :45) |
 
-This is the GCP-deployment equivalent of the same 5 sweeps that self-hosted deployments still run
+This is the GCP-deployment equivalent of the same sweeps that self-hosted deployments still run
 as BullMQ in-process repeatable jobs (`app.ts`, registered on boot) — the `QUEUE_BACKEND` env var
 (`api_env_vars`/`maintenance_env_vars`, defaults to `bullmq`) is what tells `app.ts` to skip
 registering them there once this deployment sets it to `cloud-tasks`, so the two scheduling
@@ -282,7 +286,7 @@ terraform apply production.tfplan
 This describes a first-time bootstrap of a brand-new project/environment (see the header of this
 file for why production itself no longer matches that description). Applying the Phase 0+1
 maintenance-job + scale-to-zero changes against the already-deployed production project instead
-shows a much smaller, purely additive diff: the `plunk-maintenance` Cloud Run Job, its 5 Cloud
+shows a much smaller, purely additive diff: the `plunk-maintenance` Cloud Run Job, its 8 Cloud
 Scheduler entries, the `plunk-maintenance-run` and `plunk-scheduler-run` service accounts and their
 IAM grants, plus `~` (in-place update) lines for `plunk-api`'s `min_instance_count`/`cpu_idle` and
 `plunk-web`'s `cpu_idle` — nothing else should show as changed or destroyed. Capture the live
@@ -299,7 +303,7 @@ maps reference (10 unique secret IDs in the committed template → 22 grants spl
 api/migrate/worker/maintenance), 4 `time_sleep` IAM-propagation buffers, 8 Cloud Build IAM grants, 2
 Cloud Run services plus 2 `run.invoker` bindings, 2 Cloud Run Jobs (`plunk-migrate`,
 `plunk-maintenance`) plus 1 `google_cloud_run_v2_job_iam_member` (Cloud Scheduler's invoker grant on
-`plunk-maintenance`), 5 `google_cloud_scheduler_job` entries, and 2 Cloud
+`plunk-maintenance`), 8 `google_cloud_scheduler_job` entries, and 2 Cloud
 Run Domain Mappings (`dns.tf`). That's around 63 resources total with the template's secret maps
 left as-is — the exact count scales with how many secrets you end up referencing. If `plan` errors
 instead, it's almost
@@ -319,7 +323,7 @@ ownership and starts certificate issuance as part of creating them — `apply` d
 that create call completes, even though the certificate itself is still `PROVISIONING` at that
 point (see "After apply" below). On success, Terraform prints every `outputs.tf` value: both
 services' direct, publicly-reachable `*.run.app` URLs, the migrate job, maintenance job, and
-worker pool names, the 5 maintenance Cloud Scheduler job names, the Artifact Registry path, all
+worker pool names, the 8 maintenance Cloud Scheduler job names, the Artifact Registry path, all
 seven service account emails, and `api_domain_mapping_records` / `web_domain_mapping_records` —
 the DNS records to hand Cloudflare. The two Cloud Run services, the maintenance job, and the worker
 pool come up running the placeholder `us-docker.pkg.dev/cloudrun/container/hello` image

@@ -1,43 +1,126 @@
 import Link from 'next/link';
-import React, {useState} from 'react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {AnimatePresence, motion} from 'framer-motion';
 import {DASHBOARD_URI, WIKI_URI} from '../../lib/constants';
 import Image from 'next/image';
 import logo from '../../../public/assets/logo.svg';
-import {ChevronDown, GitBranch, Inbox, Mail, Server, Users} from 'lucide-react';
+import {ArrowRight, Bot, ChevronDown, GitBranch, Inbox, Mail, Megaphone, Send, Server, Timer, Users} from 'lucide-react';
 
-const featuresMenu = [
+interface FeatureLink {
+  title: string;
+  description: string;
+  href: string;
+  icon: React.ReactNode;
+}
+
+/**
+ * The features menu, flat.
+ *
+ * It used to group six items under four mono headings with rules under each,
+ * two of which held a single item, so the panel was mostly scaffolding. Six
+ * links read fine on their own in two columns; order is row-major, so the
+ * automation and audience features lead.
+ */
+const features: FeatureLink[] = [
   {
-    title: 'Email Editor',
-    description: 'Create beautiful emails with visual or code editing',
-    href: '/features/email-editor',
-    icon: <Mail className="h-5 w-5" />,
+    title: 'Transactional email',
+    description: 'Send from your app with one API call',
+    href: '/features/transactional-email',
+    icon: <Send className="h-4 w-4" strokeWidth={1.75} />,
+  },
+  {
+    title: 'Scheduling and throttling',
+    description: 'Send later, or at most once a day',
+    href: '/features/scheduling-and-throttling',
+    icon: <Timer className="h-4 w-4" strokeWidth={1.75} />,
+  },
+  {
+    title: 'Campaigns',
+    description: 'Newsletters and product updates',
+    href: '/features/campaigns',
+    icon: <Megaphone className="h-4 w-4" strokeWidth={1.75} />,
   },
   {
     title: 'Workflows',
-    description: 'Automate email sequences with triggers and conditions',
+    description: 'Automate email from product events',
     href: '/features/workflows',
-    icon: <GitBranch className="h-5 w-5" />,
-  },
-  {
-    title: 'Inbound Email',
-    description: 'Receive and process incoming emails',
-    href: '/features/inbound-email',
-    icon: <Inbox className="h-5 w-5" />,
+    icon: <GitBranch className="h-4 w-4" strokeWidth={1.75} />,
   },
   {
     title: 'Segments',
-    description: 'Organize contacts with dynamic filtering',
+    description: 'Audiences that stay up to date',
     href: '/features/segments',
-    icon: <Users className="h-5 w-5" />,
+    icon: <Users className="h-4 w-4" strokeWidth={1.75} />,
+  },
+  {
+    title: 'Email editor',
+    description: 'Visual and HTML in one editor',
+    href: '/features/email-editor',
+    icon: <Mail className="h-4 w-4" strokeWidth={1.75} />,
+  },
+  {
+    title: 'Inbound email',
+    description: 'Receive email at your domain',
+    href: '/features/inbound-email',
+    icon: <Inbox className="h-4 w-4" strokeWidth={1.75} />,
   },
   {
     title: 'SMTP',
-    description: 'Send emails via SMTP or API',
+    description: 'Send from any existing client',
     href: '/features/smtp',
-    icon: <Server className="h-5 w-5" />,
+    icon: <Server className="h-4 w-4" strokeWidth={1.75} />,
+  },
+  {
+    title: 'MCP server',
+    description: 'Let your agent run your email',
+    href: '/features/mcp',
+    icon: <Bot className="h-4 w-4" strokeWidth={1.75} />,
   },
 ];
+
+/**
+ * One row in the features menu. Hover and keyboard focus get the same quiet
+ * feedback: a pale row and an icon tile that turns white against it.
+ */
+function FeatureRow({item, onNavigate}: {item: FeatureLink; onNavigate: () => void}) {
+  return (
+    <Link
+      href={item.href}
+      onClick={onNavigate}
+      className={
+        'group/row flex items-center gap-3 rounded-xl p-3 transition-colors hover:bg-tile focus-visible:bg-tile focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900'
+      }
+    >
+      <span
+        aria-hidden
+        className={
+          'flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-neutral-100 text-neutral-700 transition-colors group-hover/row:bg-white group-hover/row:shadow-fragment group-focus-visible/row:bg-white'
+        }
+      >
+        {item.icon}
+      </span>
+      <span className={'min-w-0'}>
+        <span className={'block text-ui font-semibold text-neutral-900'}>{item.title}</span>
+        <span className={'block text-label text-neutral-500'}>{item.description}</span>
+      </span>
+    </Link>
+  );
+}
+
+/** GitHub's mark; lucide no longer ships brand icons. */
+function GitHubMark({className}: {className?: string}) {
+  return (
+    <svg className={className} fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        fillRule="evenodd"
+        d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"
+        clipRule="evenodd"
+      />
+    </svg>
+  );
+}
+
+const REPO_URL = 'https://github.com/useplunk/plunk';
 
 /**
  *
@@ -45,6 +128,62 @@ const featuresMenu = [
 export default function Navbar() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [featuresOpen, setFeaturesOpen] = useState(false);
+  const featuresRef = useRef<HTMLDivElement>(null);
+  const featuresButtonRef = useRef<HTMLButtonElement>(null);
+
+  /**
+   * Whether the panel is open because the pointer is over the trigger.
+   *
+   * Without this, hover and click fight each other: a mouse necessarily hovers
+   * before it clicks, so the click arrives with the panel already open and a
+   * naive toggle closes it again. The trigger looks broken to every mouse user
+   * and works only for keyboards. Tracking why it opened lets the click pin a
+   * hover-opened panel instead of closing it.
+   */
+  const openedByHover = useRef(false);
+
+  const closeFeatures = useCallback(() => {
+    openedByHover.current = false;
+    setFeaturesOpen(false);
+  }, []);
+
+  const toggleFeatures = useCallback(() => {
+    if (openedByHover.current) {
+      // Hover got there first; this click pins it rather than undoing it.
+      openedByHover.current = false;
+      setFeaturesOpen(true);
+      return;
+    }
+    setFeaturesOpen(open => !open);
+  }, []);
+
+  /**
+   * Escape closes and returns focus to the trigger, and a click anywhere
+   * outside dismisses. Previously the panel opened on mouseenter alone: it had
+   * no click handler, no aria-expanded and no key handling, so a keyboard user
+   * could not open it at all.
+   */
+  useEffect(() => {
+    if (!featuresOpen) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setFeaturesOpen(false);
+      featuresButtonRef.current?.focus();
+    };
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (featuresRef.current?.contains(event.target as Node)) return;
+      setFeaturesOpen(false);
+    };
+
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('pointerdown', onPointerDown);
+    };
+  }, [featuresOpen]);
 
   return (
     <header className={'sticky top-0 z-40 w-full border-b border-neutral-200 bg-white/95 backdrop-blur-sm'}>
@@ -61,50 +200,89 @@ export default function Navbar() {
                 </Link>
               </div>
               <div className="hidden items-center gap-8 md:flex">
-                <div className={'relative'}>
+                <div
+                  ref={featuresRef}
+                  className={'relative'}
+                  onMouseEnter={() => {
+                    openedByHover.current = true;
+                    setFeaturesOpen(true);
+                  }}
+                  onMouseLeave={closeFeatures}
+                  onBlur={event => {
+                    // Tabbing out of the panel closes it, the keyboard
+                    // equivalent of the pointer leaving.
+                    if (event.currentTarget.contains(event.relatedTarget as Node)) return;
+                    closeFeatures();
+                  }}
+                >
                   <button
-                    onMouseEnter={() => setFeaturesOpen(true)}
-                    onMouseLeave={() => setFeaturesOpen(false)}
+                    ref={featuresButtonRef}
+                    type={'button'}
+                    aria-expanded={featuresOpen}
+                    aria-haspopup={'true'}
+                    aria-controls={'features-menu'}
+                    onClick={toggleFeatures}
                     className={
-                      'flex items-center gap-1.5 text-sm font-medium text-neutral-600 transition hover:text-neutral-900'
+                      'flex items-center gap-1.5 rounded-md text-ui font-medium text-neutral-600 transition hover:text-neutral-900 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-neutral-900'
                     }
                   >
                     Features
-                    <ChevronDown className={`h-4 w-4 transition-transform ${featuresOpen ? 'rotate-180' : ''}`} />
+                    <ChevronDown
+                      aria-hidden
+                      className={`h-4 w-4 transition-transform ${featuresOpen ? 'rotate-180' : ''}`}
+                    />
                   </button>
 
                   <AnimatePresence>
                     {featuresOpen && (
                       <motion.div
-                        initial={{opacity: 0, y: -10}}
+                        // AnimatePresence tracks children by key; without one it
+                        // cannot run the exit, and the panel stays mounted and
+                        // visible after closing with its links still tabbable.
+                        key={'features-menu'}
+                        id={'features-menu'}
+                        initial={{opacity: 0, y: -6}}
                         animate={{opacity: 1, y: 0}}
-                        exit={{opacity: 0, y: -10}}
-                        transition={{duration: 0.2, ease: [0.22, 1, 0.36, 1]}}
-                        onMouseEnter={() => setFeaturesOpen(true)}
-                        onMouseLeave={() => setFeaturesOpen(false)}
-                        className={
-                          'absolute left-0 top-full z-50 mt-2 w-80 rounded-[16px] border border-neutral-200 bg-white p-2 shadow-lg'
-                        }
+                        exit={{opacity: 0, y: -6}}
+                        transition={{duration: 0.18, ease: [0.22, 1, 0.36, 1]}}
+                        // The 12px gap below the trigger is padding on this
+                        // wrapper rather than a margin on the card, so the
+                        // pointer stays inside the hover region while it travels
+                        // from the button to the panel. As a margin it was a dead
+                        // zone: crossing it fired mouseleave and shut the menu
+                        // before you could reach an item.
+                        className={'absolute left-0 top-full z-50 pt-3'}
                       >
-                        {featuresMenu.map(feature => (
+                        <div
+                          className={
+                            'w-[38rem] max-w-[calc(100vw-3rem)] rounded-card border border-neutral-200 bg-white p-2 shadow-[0_12px_32px_-16px_rgba(23,23,23,0.22)]'
+                          }
+                        >
+                          <ul className={'grid grid-cols-2 gap-1'}>
+                            {features.map(item => (
+                              // An odd count would leave the last cell empty; let it take the row
+                              <li key={item.href} className={'odd:last:col-span-2'}>
+                                <FeatureRow item={item} onNavigate={closeFeatures} />
+                              </li>
+                            ))}
+                          </ul>
                           <Link
-                            key={feature.href}
-                            href={feature.href}
-                            className={'flex items-start gap-3 rounded-[10px] p-3 transition hover:bg-neutral-50'}
+                            href={'/changelog'}
+                            onClick={closeFeatures}
+                            className={
+                              'group/foot mt-1 flex items-center justify-between gap-4 rounded-xl bg-tile px-4 py-3 text-ui transition-colors hover:bg-neutral-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-900'
+                            }
                           >
-                            <div
-                              className={
-                                'mt-0.5 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-neutral-900 text-white'
-                              }
-                            >
-                              {feature.icon}
-                            </div>
-                            <div className={'flex-1'}>
-                              <div className={'text-sm font-semibold text-neutral-900'}>{feature.title}</div>
-                              <div className={'mt-0.5 text-xs text-neutral-600'}>{feature.description}</div>
-                            </div>
+                            <span className={'text-neutral-600'}>See what shipped recently</span>
+                            <span className={'inline-flex items-center gap-1.5 font-semibold text-neutral-900'}>
+                              Changelog
+                              <ArrowRight
+                                aria-hidden
+                                className={'h-3.5 w-3.5 transition-transform group-hover/foot:translate-x-0.5'}
+                              />
+                            </span>
                           </Link>
-                        ))}
+                        </div>
                       </motion.div>
                     )}
                   </AnimatePresence>
@@ -112,23 +290,16 @@ export default function Navbar() {
 
                 <Link
                   href={'/made-by-humans'}
-                  className={'text-sm font-medium text-neutral-600 transition hover:text-neutral-900'}
+                  className={'text-ui font-medium text-neutral-600 transition hover:text-neutral-900'}
                 >
                   By humans
                 </Link>
 
                 <Link
                   href={'/pricing'}
-                  className={'text-sm font-medium text-neutral-600 transition hover:text-neutral-900'}
+                  className={'text-ui font-medium text-neutral-600 transition hover:text-neutral-900'}
                 >
                   Pricing
-                </Link>
-
-                <Link
-                  href={'/guides'}
-                  className={'text-sm font-medium text-neutral-600 transition hover:text-neutral-900'}
-                >
-                  Guides
                 </Link>
 
                 <Link
@@ -136,7 +307,7 @@ export default function Navbar() {
                   target={'_blank'}
                   rel={'noreferrer'}
                   className={
-                    'flex items-center gap-x-1.5 text-sm font-medium text-neutral-600 transition hover:text-neutral-900'
+                    'flex items-center gap-x-1.5 text-ui font-medium text-neutral-600 transition hover:text-neutral-900'
                   }
                 >
                   Docs
@@ -155,9 +326,23 @@ export default function Navbar() {
             </div>
 
             <div className="hidden items-center gap-6 md:flex">
+              {/* The star count is the one stat from the old hero strip worth
+                  keeping, and it belongs next to the repository it counts. */}
+              <a
+                href={REPO_URL}
+                target={'_blank'}
+                rel={'noopener noreferrer'}
+                aria-label={'Plunk on GitHub, 5,000+ stars'}
+                className={
+                  'inline-flex items-center gap-2 text-ui font-medium text-neutral-600 transition hover:text-neutral-900'
+                }
+              >
+                <GitHubMark className={'h-4 w-4'} />
+                <span className={'tabular-nums'}>5k</span>
+              </a>
               <a
                 href={`${DASHBOARD_URI}/auth/login`}
-                className={'text-sm font-medium text-neutral-600 transition hover:text-neutral-900'}
+                className={'text-ui font-medium text-neutral-600 transition hover:text-neutral-900'}
               >
                 Sign in
               </a>
@@ -166,10 +351,10 @@ export default function Navbar() {
                 whileTap={{scale: 0.98}}
                 href={`${DASHBOARD_URI}/auth/signup`}
                 className={
-                  'rounded-full bg-neutral-900 px-6 py-2.5 text-sm font-semibold text-white transition hover:bg-neutral-800'
+                  'rounded-full bg-neutral-900 px-6 py-2.5 text-ui font-semibold text-white transition hover:bg-neutral-800'
                 }
               >
-                Get started
+                Start for free
               </motion.a>
             </div>
 
@@ -212,6 +397,11 @@ export default function Navbar() {
         <AnimatePresence>
           {mobileOpen && (
             <motion.div
+              // aria-controls on the trigger already pointed at "mobile-menu",
+              // but nothing carried that id, so the reference dangled. The key
+              // is what lets AnimatePresence run the exit and unmount it.
+              key={'mobile-menu'}
+              id={'mobile-menu'}
               initial={{height: 0, opacity: 0}}
               animate={{height: 'auto', opacity: 1}}
               exit={{height: 0, opacity: 0}}
@@ -225,36 +415,19 @@ export default function Navbar() {
                 transition={{duration: 0.2}}
                 className="space-y-1 p-4"
               >
-                <div className="mb-2">
-                  <div style={{fontFamily: 'var(--font-mono)'}} className="px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-neutral-500">
-                    Features
-                  </div>
-                  {featuresMenu.map(feature => (
-                    <Link
-                      key={feature.href}
-                      href={feature.href}
-                      onClick={() => setMobileOpen(false)}
-                      className="flex items-start gap-3 rounded-lg px-4 py-3 transition hover:bg-neutral-100"
-                    >
-                      <div
-                        className={
-                          'mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-neutral-900 text-white'
-                        }
-                      >
-                        {feature.icon}
-                      </div>
-                      <div className={'flex-1'}>
-                        <div className={'text-sm font-semibold text-neutral-900'}>{feature.title}</div>
-                        <div className={'mt-0.5 text-xs text-neutral-600'}>{feature.description}</div>
-                      </div>
-                    </Link>
+                <p className={'px-3 pb-1 pt-1 text-label font-semibold text-neutral-500'}>Features</p>
+                <ul className={'mb-3'}>
+                  {features.map(item => (
+                    <li key={item.href}>
+                      <FeatureRow item={item} onNavigate={() => setMobileOpen(false)} />
+                    </li>
                   ))}
-                </div>
+                </ul>
 
                 <Link
                   href={'/made-by-humans'}
                   onClick={() => setMobileOpen(false)}
-                  className="block rounded-lg px-4 py-3 text-sm font-medium text-neutral-600 transition hover:bg-neutral-100 hover:text-neutral-900"
+                  className="block rounded-lg px-4 py-3 text-ui font-medium text-neutral-600 transition hover:bg-neutral-100 hover:text-neutral-900"
                 >
                   By humans
                 </Link>
@@ -262,40 +435,43 @@ export default function Navbar() {
                 <Link
                   href={'/pricing'}
                   onClick={() => setMobileOpen(false)}
-                  className="block rounded-lg px-4 py-3 text-sm font-medium text-neutral-600 transition hover:bg-neutral-100 hover:text-neutral-900"
+                  className="block rounded-lg px-4 py-3 text-ui font-medium text-neutral-600 transition hover:bg-neutral-100 hover:text-neutral-900"
                 >
                   Pricing
-                </Link>
-
-                <Link
-                  href={'/guides'}
-                  onClick={() => setMobileOpen(false)}
-                  className="block rounded-lg px-4 py-3 text-sm font-medium text-neutral-600 transition hover:bg-neutral-100 hover:text-neutral-900"
-                >
-                  Guides
                 </Link>
 
                 <a
                   href={WIKI_URI}
                   target={'_blank'}
                   rel={'noreferrer'}
-                  className="block rounded-lg px-4 py-3 text-sm font-medium text-neutral-600 transition hover:bg-neutral-100 hover:text-neutral-900"
+                  className="block rounded-lg px-4 py-3 text-ui font-medium text-neutral-600 transition hover:bg-neutral-100 hover:text-neutral-900"
                 >
                   Docs
+                </a>
+
+                <a
+                  href={REPO_URL}
+                  target={'_blank'}
+                  rel={'noopener noreferrer'}
+                  className="flex items-center gap-2 rounded-lg px-4 py-3 text-ui font-medium text-neutral-600 transition hover:bg-neutral-100 hover:text-neutral-900"
+                >
+                  <GitHubMark className={'h-4 w-4'} />
+                  GitHub
+                  <span className={'text-neutral-500 tabular-nums'}>5,000+ stars</span>
                 </a>
 
                 <div className="border-t border-neutral-200 pt-4">
                   <a
                     href={`${DASHBOARD_URI}/auth/login`}
-                    className="block rounded-lg px-4 py-3 text-sm font-medium text-neutral-600 transition hover:bg-neutral-100 hover:text-neutral-900"
+                    className="block rounded-lg px-4 py-3 text-ui font-medium text-neutral-600 transition hover:bg-neutral-100 hover:text-neutral-900"
                   >
                     Sign in
                   </a>
                   <a
                     href={`${DASHBOARD_URI}/auth/signup`}
-                    className="mt-2 block rounded-full bg-neutral-900 px-4 py-3 text-center text-sm font-semibold text-white transition hover:bg-neutral-800"
+                    className="mt-2 block rounded-full bg-neutral-900 px-4 py-3 text-center text-ui font-semibold text-white transition hover:bg-neutral-800"
                   >
-                    Get started
+                    Start for free
                   </a>
                 </div>
               </motion.div>

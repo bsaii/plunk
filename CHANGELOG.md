@@ -1,5 +1,220 @@
 # Changelog
 
+## [0.18.0](https://github.com/useplunk/plunk/compare/v0.17.0...v0.18.0) (2026-10-28)
+
+
+### Features
+
+* Add throttle for transactional emails and workflows ([f228961](https://github.com/useplunk/plunk/commit/f228961320d802ef20cd6eb101cd6891b9eaca04))
+* **api:** let headless senders point List-Unsubscribe at their own one-click link ([50be3c9](https://github.com/useplunk/plunk/commit/50be3c9fa322511519301ce1965c079faf9fbcb1))
+* let headless senders point List-Unsubscribe at their own one-click link ([d5c5f89](https://github.com/useplunk/plunk/commit/d5c5f8905133c54e8ad8ddb79eef6f937e117e8d))
+* Verify SES configuration sets on startup ([2f3cb50](https://github.com/useplunk/plunk/commit/2f3cb509080b98e34165fb7f49895a0ab97283b5))
+
+
+### Bug Fixes
+
+* **api:** encode non-ASCII headers and attachment filenames ([ea3e7ae](https://github.com/useplunk/plunk/commit/ea3e7aee93200e42804fef6207d3cfa44b55e59d))
+* **api:** encode non-ASCII headers and attachment filenames ([de90dae](https://github.com/useplunk/plunk/commit/de90dae23aa5955d228c856ede777c9bdb1a21cf))
+* **api:** honour data-plunk-one-click for headless sends only ([6f9cebf](https://github.com/useplunk/plunk/commit/6f9cebf0a6cc5477f5534a8f75761cca2c1d0486))
+* **api:** verify request origin on session-authenticated routes ([00177cc](https://github.com/useplunk/plunk/commit/00177ccf819d6efa10ea21c4ad5574091665d813))
+* **api:** verify request origin on session-authenticated routes ([6eacbfc](https://github.com/useplunk/plunk/commit/6eacbfcead400135986dbe8519252ef281b43e7a))
+* Cancel workflow executions and scheduled campaigns when a project is disabled ([cf2d384](https://github.com/useplunk/plunk/commit/cf2d3844d9b90ab94681b53399580d09cc1f5c12))
+* **contacts:** honour the status filter in select-all bulk actions ([0fe3b07](https://github.com/useplunk/plunk/commit/0fe3b07a58b56da4d0e7703e14917784666f569c))
+* **contacts:** honour the status filter in select-all bulk actions ([d794c5a](https://github.com/useplunk/plunk/commit/d794c5a67280ba0ff05ad02bfe452f0592d817f5))
+* Correctly end job if last step of workflow is delay ([18f18c1](https://github.com/useplunk/plunk/commit/18f18c11cbef8ba37f329af63359cbc8a17771ec))
+* **landing:** Remove inbound attachment and threading claims ([beac2e3](https://github.com/useplunk/plunk/commit/beac2e3bba4c3bd50d7f7e1392516058e225a6f2))
+* **mcp:** page through campaigns and templates with page/pageSize ([e720913](https://github.com/useplunk/plunk/commit/e72091387ba5f52e2f7f7994b6eab8bab0941d5b))
+* **mcp:** page through campaigns and templates with page/pageSize ([28e0aa4](https://github.com/useplunk/plunk/commit/28e0aa4c018882c6b8f6e145e207fec378c24f04))
+* **mcp:** read the bare array GET /segments returns in plunk_list_segments ([3de3369](https://github.com/useplunk/plunk/commit/3de3369baba82703de15da19d879b131035bcbbc))
+* **mcp:** read the bare array GET /segments returns in plunk_list_segments ([674c2f5](https://github.com/useplunk/plunk/commit/674c2f5e6ed8cb904c642b278daa8e6498b65317))
+* Only accept SNS messages from topics in our own AWS account ([4c84f64](https://github.com/useplunk/plunk/commit/4c84f64b4ee4fd6fd99ba2f9946504b53df75ec3))
+* **segments:** filter by segment membership without loading members ([5848c60](https://github.com/useplunk/plunk/commit/5848c600e071510ea896d38d33c5728fedc9d4aa))
+* **segments:** filter by segment membership without loading members ([d44788f](https://github.com/useplunk/plunk/commit/d44788f5c21cf2f3d8941f654b7539bb2801c04f))
+* **segments:** scope referenced segments to the project ([ce58df5](https://github.com/useplunk/plunk/commit/ce58df59e2b9e70b9cf24315e2b650230948a599))
+* **templates:** only accept filters that keep the unsubscribe URL intact ([6f2508c](https://github.com/useplunk/plunk/commit/6f2508cfcfba81d7b4e2be40da8859ac187acdfd))
+* **templates:** recognise spaced unsubscribe placeholders in the headless warning ([3e7ee20](https://github.com/useplunk/plunk/commit/3e7ee20d6a6587221da2219068ee968441c6c3e4))
+* **templates:** recognise spaced unsubscribe variables in the headless warning ([dd2c6c0](https://github.com/useplunk/plunk/commit/dd2c6c09c2a1e87a38da372016dded1df41b471b))
+* **webhooks:** ignore opens SES marks as automated ([3c1af34](https://github.com/useplunk/plunk/commit/3c1af34b614da4a1e0aebf014e8f0ebddbbd51b0))
+* **webhooks:** ignore opens SES marks as automated ([032b868](https://github.com/useplunk/plunk/commit/032b868cf738005a0e3ddc9a541edcdd00d8970f)), closes [#531](https://github.com/useplunk/plunk/issues/531)
+* **web:** refetch project data once the active project is known ([537d5a4](https://github.com/useplunk/plunk/commit/537d5a489fcb7be4a7bc168fd3f02539ab184393))
+* **web:** refetch project data once the active project is known ([b7e1265](https://github.com/useplunk/plunk/commit/b7e1265bf2077fa95bedf94e02f07c3055c9f5b4))
+* **web:** start from an empty cache after signing out ([1097f0c](https://github.com/useplunk/plunk/commit/1097f0c00a54e4553af9eaa51075371d6c3f96b4))
+* **workflows:** keep cancelled executions from resuming ([189b907](https://github.com/useplunk/plunk/commit/189b9070577f8202db010d66dc467c0d7043c2b8))
+* **workflows:** keep cancelled executions from resuming ([7792d6b](https://github.com/useplunk/plunk/commit/7792d6b28e4bb3702cb393f6dc66fb1f1ff70ff6))
+* **workflows:** mark only the step that failed ([2c11c81](https://github.com/useplunk/plunk/commit/2c11c81eb8a32d5bc680b6a97b3d79925f692082))
+* **workflows:** mark only the step that failed ([ee8db3f](https://github.com/useplunk/plunk/commit/ee8db3f5ff0bf20cfd445cdcc2b436f5e40054cc))
+* **workflows:** resume a waiting step once ([d0f5471](https://github.com/useplunk/plunk/commit/d0f5471744996f10ff8e677fcb84a340b55ac0c7))
+* **workflows:** resume a waiting step once ([9c333bb](https://github.com/useplunk/plunk/commit/9c333bb046ca37e701418820e54a7fc84311317c))
+* **workflows:** treat a zero wait timeout as no limit ([0ab8bf9](https://github.com/useplunk/plunk/commit/0ab8bf94f300f3bb82eedb44b545588beb288bcd))
+* **workflows:** treat a zero wait timeout as no limit ([006cc4c](https://github.com/useplunk/plunk/commit/006cc4c7c8f0015105a89303b9a3cc5784ab7073))
+
+
+### Performance Improvements
+
+* **contacts:** serve the contact field list from Redis ([627f7e9](https://github.com/useplunk/plunk/commit/627f7e9cf3ed71ce7a6b2bab7bebf6ce1a2941e3))
+* **contacts:** serve the contact field list from Redis ([af0007f](https://github.com/useplunk/plunk/commit/af0007fd9ea0f3e33af6226adddb4b040f4167d1))
+
+
+### Code Refactoring
+
+* **web:** correct comments around the active project choice ([df2f38b](https://github.com/useplunk/plunk/commit/df2f38b3569f3cb85b07f066f1cf033b0670dcc8))
+
+
+### Documentation
+
+* Add open tracking and workflow improvements to the changelog ([1fe84b5](https://github.com/useplunk/plunk/commit/1fe84b5b23eac5b7dd426fdd87ace0a2b1c1813f))
+* document data-plunk-one-click for sender-hosted one-click unsubscribe ([77e85b8](https://github.com/useplunk/plunk/commit/77e85b8e3db6b03f1e68e88709c1c859ab806078))
+* **tracking:** explain how automatic opens are left out ([9805c18](https://github.com/useplunk/plunk/commit/9805c188ec4e9ffc44918cb1052dc0c754b74796)), closes [#531](https://github.com/useplunk/plunk/issues/531)
+* **workflows:** say what cancelling an execution stops ([cf264fa](https://github.com/useplunk/plunk/commit/cf264fa4b1f5d0fba977da44827c0daf8d1afec1))
+* **workflows:** suggest the email event names workflows receive ([bf6a6ef](https://github.com/useplunk/plunk/commit/bf6a6ef705673d80d8a07b644ab4267098ac7eb8))
+* **workflows:** suggest the email event names workflows receive ([2eac0dd](https://github.com/useplunk/plunk/commit/2eac0dd1ab99eb98a0ae47bc1bd9fdd52da56a47))
+
+## [0.17.0](https://github.com/useplunk/plunk/compare/v0.16.0...v0.17.0) (2026-10-21)
+
+
+### Features
+
+* add S3_PREFIX to store uploads under a folder in the bucket ([fb0363f](https://github.com/useplunk/plunk/commit/fb0363f8e7a185b818d38cb57dd0fd9904c4f5a1))
+* Add unsubscribedAt on email ([0cbd5cb](https://github.com/useplunk/plunk/commit/0cbd5cb7b1fcd86f52281bcb0542b25a6ba035df))
+* Add upgrade analytics dashboard ([f9ba5e5](https://github.com/useplunk/plunk/commit/f9ba5e5e597e125a2c4e55f940f76b3d49dae71d))
+* Allow multiple projects under one MCP install ([dbd77d1](https://github.com/useplunk/plunk/commit/dbd77d13c845d27c87cbbb1f442c4bbe0bbc6160))
+* Correctly identify rejection statuses on verification ([d4621a9](https://github.com/useplunk/plunk/commit/d4621a98c7cae9dd91b27c99c74d943cd5ba5090))
+* Enhanced campaign display ([44b4b10](https://github.com/useplunk/plunk/commit/44b4b108fbfb7c7f83f16213ffeafd7fb06a301e))
+* Enhanced segment display ([4774e38](https://github.com/useplunk/plunk/commit/4774e38ec87d254fb943e874242b9633ff39302f))
+* Enhanced templates display ([c70cacf](https://github.com/useplunk/plunk/commit/c70cacf1e9b4f02b93c466a3d68e1597917d9927))
+* Enhanced workflow display ([3d5bcb6](https://github.com/useplunk/plunk/commit/3d5bcb6e924e0e93e9f17e5c3f67c69a0f67906a))
+* Remove in-flow verification fee and default to off-session flow ([b91ae18](https://github.com/useplunk/plunk/commit/b91ae188b45867839588ae3ca156e09de9a80db8))
+* Show maximum 1 banner on home with additional details ([209baee](https://github.com/useplunk/plunk/commit/209baeea5516528e56a5746d6ac0144bf6371bca))
+
+
+### Bug Fixes
+
+* Add additional indexes to speed up analytics and search ([ded0e3b](https://github.com/useplunk/plunk/commit/ded0e3b2f831318848b14dd0075936fa8f3e605c))
+* Add invoice for verification charges ([756d9f0](https://github.com/useplunk/plunk/commit/756d9f036d887fb9a7994ef4de9033e9fab5743b))
+* Add lazy loading of email bodies to speed up activity feed ([76b4efb](https://github.com/useplunk/plunk/commit/76b4efbd9f1c2db4b0260407f6c97c19b2182518))
+* **api:** keep username and TLS when parsing REDIS_URL for queues ([d163865](https://github.com/useplunk/plunk/commit/d163865cb2eb878eaad15148917f4aa4eb4d74d2))
+* Harmonize deletion and confirmation modals ([12f9f20](https://github.com/useplunk/plunk/commit/12f9f20f7c991b94063c51b7ad03c875e08d90c9))
+* Harmonize UI across various pages ([8c8cbda](https://github.com/useplunk/plunk/commit/8c8cbdafc1df4c74fd68fab289eb4a3202918744))
+* release please configuration for MCP server ([71969bd](https://github.com/useplunk/plunk/commit/71969bd0e59fbfae20cc657aee0598f01adfc2c6))
+* **smtp:** hot-reload renewed TLS certificates without restart ([bc84b4a](https://github.com/useplunk/plunk/commit/bc84b4ada0482f84f9226e3a1afb08900d5d39fe))
+* **smtp:** hot-reload renewed TLS certificates without restart ([30a04a4](https://github.com/useplunk/plunk/commit/30a04a445f3a321d7c3400240a01d45860e9176b))
+* **smtp:** pick up certificates issued after startup and harden reloads ([873849c](https://github.com/useplunk/plunk/commit/873849cd5542061be840cd4b6073224a0e9fa49b))
+
+
+### Documentation
+
+* warn that setting S3_PREFIX on an existing install breaks old uploads ([a9350e5](https://github.com/useplunk/plunk/commit/a9350e57d2b56ae2cee555d697462bf095d800ec))
+
+## [0.16.0](https://github.com/useplunk/plunk/compare/v0.15.0...v0.16.0) (2026-10-08)
+
+
+### Features
+
+* Add automatic conversion to text/plain ([17e840b](https://github.com/useplunk/plunk/commit/17e840b6d039af8b85217ed8c1de3267b75fd615))
+* **mcp:** add workflow tools ([68a2c9b](https://github.com/useplunk/plunk/commit/68a2c9b7fdcbdca7b9aef348f1868ceca70babb9))
+* **mcp:** add workflow tools ([e509745](https://github.com/useplunk/plunk/commit/e50974557211fb57b4f56450d2bd1c3bbf51f5dd))
+* **mcp:** build complete workflows through the MCP server ([70c97b8](https://github.com/useplunk/plunk/commit/70c97b81e2b352d817e054a652cfa64de45670ea))
+* **mcp:** build complete workflows through the MCP server ([60ca091](https://github.com/useplunk/plunk/commit/60ca091669c592fcbed18a46a7a7c4a5c4125739))
+* Security email templates based on stats ([e2ab14c](https://github.com/useplunk/plunk/commit/e2ab14c747c24e1c7ce0d78c1e97597799e2c63a))
+
+
+### Bug Fixes
+
+* Accept both data.key and key as valid ([02ea46e](https://github.com/useplunk/plunk/commit/02ea46ed0c2d1eb82bbf1fe22f5846f2b78de059))
+* Correctly validate Regex expressions ([f3cd82c](https://github.com/useplunk/plunk/commit/f3cd82cc059ad3842bb659def033f9b61c87f1d8))
+* derive cookie and root domains from the Public Suffix List ([b200433](https://github.com/useplunk/plunk/commit/b20043308f45b5352acb92e08214fa4d3acbf344))
+* derive cookie and root domains from the Public Suffix List ([0cb966b](https://github.com/useplunk/plunk/commit/0cb966b5244aa04597c1a4aad9c9e36f2773c4bc)), closes [#501](https://github.com/useplunk/plunk/issues/501)
+* honor NGINX_PORT in container healthchecks ([70f72e3](https://github.com/useplunk/plunk/commit/70f72e3504326b9719d1045027e8b72edfd8b17d))
+* honor NGINX_PORT in container healthchecks ([bb24bee](https://github.com/useplunk/plunk/commit/bb24bee65bf9173656e7d7ac5b049fe255fe22da))
+* Minio version in workflows ([cc77d5f](https://github.com/useplunk/plunk/commit/cc77d5f085a58c061b5a3877b77fa861f8292054))
+* Only let the metric that moved disable a project ([7b4cd32](https://github.com/useplunk/plunk/commit/7b4cd323770fd747d40a2b36897fc3f289658ee5))
+* Only let the metric that moved disable a project ([f9a8184](https://github.com/useplunk/plunk/commit/f9a818489dbc3b0f40e5336ebff09c0cc662bf6b))
+
+## [0.15.0](https://github.com/useplunk/plunk/compare/v0.14.0...v0.15.0) (2026-09-20)
+
+
+### Features
+
+* Add ability to snooze contacts instead of unsubscribing ([787d200](https://github.com/useplunk/plunk/commit/787d200acd47d4be6b447a6649fc602f59d49e5a))
+* Add ability to snooze contacts instead of unsubscribing ([04dab0c](https://github.com/useplunk/plunk/commit/04dab0cd814168b64dca8020b156703e0d93172c))
+* Add dedicated events for contact.subscribe and contact.unsubscribe ([ab4a48b](https://github.com/useplunk/plunk/commit/ab4a48b347ab196d5af4655e3aa7d75e1a06e580))
+* Add improved tracking for unsubscribes and complaints ([37626cb](https://github.com/useplunk/plunk/commit/37626cb5d5a0a208ed0bc6a2ab1bd4d3be2731ef))
+* Add sponsor link in navbar ([32142c3](https://github.com/useplunk/plunk/commit/32142c3d4d76e504ef52dca14e84557cfd8d7175))
+* add Welsh translations ([9457556](https://github.com/useplunk/plunk/commit/94575561b88180a8500912cc5a1471b411da6fa3))
+* add Welsh translations ([53a655c](https://github.com/useplunk/plunk/commit/53a655c4640f1c6298d6fd02b1e5eaf5b9158df6))
+* Archive campaigns ([ea1fb5a](https://github.com/useplunk/plunk/commit/ea1fb5a5b3d7b913b89196c8c3a47385b24932c5))
+* Delete account ([93fa1bf](https://github.com/useplunk/plunk/commit/93fa1bf751d9da59b2d90b4a64bcdcd659825764))
+* Handle simulated AWS addresses. ([0d502da](https://github.com/useplunk/plunk/commit/0d502da15c33c29ed18cfccff64be30b8bff3298)), closes [#491](https://github.com/useplunk/plunk/issues/491)
+* Improved bounce and complaint stats for campaigns ([9b11de5](https://github.com/useplunk/plunk/commit/9b11de581f1bc4bebce134cc0ed9d66589e09733))
+* Use campaigns after cancel ([541aca6](https://github.com/useplunk/plunk/commit/541aca613071bf85d6446a0c5bda966414c463f6))
+
+
+### Bug Fixes
+
+* avoid hidden Unicode warning for Welsh flag ([e3bb563](https://github.com/useplunk/plunk/commit/e3bb563c0bb615a1453eabcf5369289bcf29b0fc))
+* Correctly hide email verification banner if features is toggled off ([9d3b600](https://github.com/useplunk/plunk/commit/9d3b6004b91fece20bdc86736e3fd4647153b67c))
+* Historical backfill of campaign data and improvements to handling ([2211b25](https://github.com/useplunk/plunk/commit/2211b25c7b8f2586e84bcdd3dae1e9a5ad5c8dff))
+* Ignore failed emails to calculate billing limits ([a9532dd](https://github.com/useplunk/plunk/commit/a9532dd049a7d7eda6f29cd866afa619e8dd22f0))
+* Incrementation on send for stats ([319cee9](https://github.com/useplunk/plunk/commit/319cee92ca8ba448be7d41e1c46714d1a48a351e))
+* Move Minio from Docker Hub to Quay ([1df7bfb](https://github.com/useplunk/plunk/commit/1df7bfb3a5c6bb5bf99301daa5dda1e8a80d2655))
+* Move Minio from Docker Hub to Quay ([7215b5f](https://github.com/useplunk/plunk/commit/7215b5f0a27c631745b8a53e6c511dd7eccbd54d))
+* Prevent double delivery of bounce and complaint events ([6bb4351](https://github.com/useplunk/plunk/commit/6bb4351c15d8d10366098595fb8d2c667ef6f5b7))
+* Remove lock_timeout from migration ([df7afd8](https://github.com/useplunk/plunk/commit/df7afd8d04b78b71193239a7a3356eeda5bd698c))
+* use literal Welsh flag emoji ([6acfe33](https://github.com/useplunk/plunk/commit/6acfe338e6940cffb824b6a531b79bf2637d9cf1))
+* use Welsh flag emoji ([20361ed](https://github.com/useplunk/plunk/commit/20361ed1f579c6858adf9a37b8ccfd40f0f26f3c))
+* **workflows:** validate template ownership ([bb4f544](https://github.com/useplunk/plunk/commit/bb4f5440d4a3374fd8cd2b59d8f7c1e5b49311aa))
+* **workflows:** validate template ownership ([9836930](https://github.com/useplunk/plunk/commit/98369303db8fd3bc83f4552edd186446d783ddbd))
+
+
+### Code Refactoring
+
+* Redesign domain settings for clearer and smoother setup ([2e90539](https://github.com/useplunk/plunk/commit/2e9053949568e25b26613d3fc6fb59104d19d338))
+
+
+### Documentation
+
+* Add changelog page ([641283b](https://github.com/useplunk/plunk/commit/641283b94ef17a002f92728ce8e53c99da6066c1))
+
+## [0.14.0](https://github.com/useplunk/plunk/compare/v0.13.0...v0.14.0) (2026-08-17)
+
+
+### Features
+
+* Add additional card verification in worker ([33cc815](https://github.com/useplunk/plunk/commit/33cc81547c2d2d936f2977680239429ef025c6eb))
+* Add additional tools to MCP for contacts and campaigns ([24b48cb](https://github.com/useplunk/plunk/commit/24b48cbfbde3cc15b784a3aca1701194305dd9f0))
+* Add event context to send email step ([4fa6379](https://github.com/useplunk/plunk/commit/4fa63795a07afea5740bccf7d55c2976d4e0e1b8))
+* Add foundations for Plunk MCP Server ([5828309](https://github.com/useplunk/plunk/commit/5828309ce41794bf39d35df49639c5cfe8e3b7fc))
+* Add foundations for Plunk MCP Server ([00b0a92](https://github.com/useplunk/plunk/commit/00b0a92bf9dd883f05bd5d44e5fde026e1a35ca2))
+* Add foundations for Plunk MCP Server ([7167a0a](https://github.com/useplunk/plunk/commit/7167a0a2bba5992f230292240ef9d582511ec775))
+* Add optional rate limiting for track, send and contact endpoints ([05080e7](https://github.com/useplunk/plunk/commit/05080e71714edaa5d13875e313504c748315d39f))
+* **web:** highlight Liquid logic tags in the visual editor ([556167d](https://github.com/useplunk/plunk/commit/556167da9085f053fc703abf42be626df0381042))
+* **web:** insert logic blocks across lines when starting a fresh line ([bfa3ee9](https://github.com/useplunk/plunk/commit/bfa3ee94c4783e8398e753d5ad3c2a834b46a932))
+* **web:** offer case, contains, for/else, comment and raw blocks ([54c8f30](https://github.com/useplunk/plunk/commit/54c8f302fe898a1176c937296d3eff586429aa09))
+* **web:** offer ready-made Liquid blocks, and rebuild both suggestion menus ([7c3b2ca](https://github.com/useplunk/plunk/commit/7c3b2ca8fa267261d1950fc18bf6af5edea225ef))
+* **web:** report template syntax errors while editing ([c48401b](https://github.com/useplunk/plunk/commit/c48401bd79ea3558f3772dbcd58fac27caf59b02))
+* **web:** warn about field references that will never resolve ([066470c](https://github.com/useplunk/plunk/commit/066470c77bcc1a1139d3e5a8ad764b682ad6ae16))
+
+
+### Bug Fixes
+
+* improve performance tests to work on CI and fix test config ([a3de94d](https://github.com/useplunk/plunk/commit/a3de94d78954129ced8b673fb327712caba318c2))
+* **smtp:** preserve Reply-To when relaying to /v1/send ([ce3bcf0](https://github.com/useplunk/plunk/commit/ce3bcf05afb97ab37be944b9b6037d5c60ef8d31))
+* **smtp:** preserve Reply-To when relaying to /v1/send ([73d0d5a](https://github.com/useplunk/plunk/commit/73d0d5a6726539e65edbcdb5d5956be6a850d839))
+* **templates:** stop rejecting inline bodies on /v1/send ([474034d](https://github.com/useplunk/plunk/commit/474034df9b521a600ca25147b616dcccbba48624))
+* **web:** don't warn about the workflow event payload ([1fac3a8](https://github.com/useplunk/plunk/commit/1fac3a883d9b7ec2ca3bc1c9021759333177f08a))
+
+
+### Performance Improvements
+
+* **templates:** stop re-rendering a template that blew a runtime limit ([e78abb7](https://github.com/useplunk/plunk/commit/e78abb70ce07a9807dc19a420b4fbf9980aed375))
+
+
+### Code Refactoring
+
+* Remove md documents ([df936f3](https://github.com/useplunk/plunk/commit/df936f342dce295e0ffd31bdc5e76f7740186527))
+* **web:** rewrite UX copy for clarity and consistency ([15ecf58](https://github.com/useplunk/plunk/commit/15ecf583c5fa747fbd2e13845f1caf588a879feb))
+* **web:** rewrite UX copy for clarity and consistency ([a62001e](https://github.com/useplunk/plunk/commit/a62001e23c78bf512526d35b495e71f51686ffd7))
+
 ## [0.13.0](https://github.com/useplunk/plunk/compare/v0.12.0...v0.13.0) (2026-08-09)
 
 

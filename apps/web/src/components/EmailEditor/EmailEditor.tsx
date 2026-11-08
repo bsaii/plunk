@@ -8,15 +8,19 @@ import {Link} from '@tiptap/extension-link';
 import Placeholder from '@tiptap/extension-placeholder';
 import {Variable} from './VariableExtension';
 import {setAvailableVariables, VariableMention} from './VariableMention';
+import {LogicMention} from './LogicMention';
+import {subscribeSuggestionOpen} from './suggestionPopup';
 import {Toolbar} from './Toolbar';
 import {ResizableImage} from './ResizableImage';
 import {HtmlEditor} from './HtmlEditor';
 import {useContactFields, useContacts, useSegmentContacts} from '../../lib/hooks/useContacts';
 import {useConfig} from '../../lib/hooks/useConfig';
+import {useTemplateFieldWarnings, useTemplateValidation} from '../../lib/hooks/useTemplateValidation';
 import {useEffect, useRef, useState} from 'react';
 import {renderTemplate} from '@plunk/shared';
 import {
   Button,
+  ConfirmDialog,
   Dialog,
   DialogContent,
   DialogHeader,
@@ -29,7 +33,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@plunk/ui';
-import {Code2, Eye, Monitor, Smartphone, Tablet, Upload, X} from 'lucide-react';
+import {AlertTriangle, Code2, Eye, Monitor, Smartphone, Tablet, Upload, X} from 'lucide-react';
 import {network} from '../../lib/network';
 import {detectCustomHtmlPatterns, wrapEmailWithStyles} from '../../lib/emailStyles';
 import 'tippy.js/dist/tippy.css';
@@ -74,7 +78,21 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Fetch available contact fields using SWR
-  const {fields: availableFields} = useContactFields();
+  const {fields: availableFields, fieldDetails} = useContactFields();
+
+  // Surface Liquid syntax errors while editing. Saving rejects an unparseable template
+  // anyway, so the alternative is learning about a typo from a 400 after the fact.
+  const syntaxIssue = useTemplateValidation(htmlContent);
+
+  // Fields that parse but resolve to nothing: a typo, or a field so few contacts carry
+  // that the template is blank for most of the audience. Only shown once the template
+  // parses — a broken template makes every reference in it suspect.
+  const fieldWarnings = useTemplateFieldWarnings(htmlContent, fieldDetails);
+
+  // A trigger being completed (`{%ema` with its menu open) is not valid Liquid yet.
+  // Reporting that as an error would contradict the menu offering to finish it.
+  const [suggestionOpen, setSuggestionOpen] = useState(false);
+  useEffect(() => subscribeSuggestionOpen(setSuggestionOpen), []);
 
   // Fetch contacts for preview using SWR.
   // When the campaign targets a segment, scope the dropdown to that segment's
@@ -84,10 +102,10 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
   const contacts = segmentId ? segmentContacts : allContacts;
 
   useEffect(() => {
-    if (availableFields.length > 0) {
-      setAvailableVariables(availableFields);
+    if (fieldDetails.length > 0) {
+      setAvailableVariables(fieldDetails);
     }
-  }, [availableFields]);
+  }, [fieldDetails]);
 
   // Clear the preview selection when the chosen contact is no longer in the
   // available list (e.g. the segment changed). Otherwise the preview stays
@@ -124,8 +142,9 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       ResizableImage,
       Variable,
       VariableMention,
+      LogicMention,
       Placeholder.configure({
-        placeholder: placeholder || 'Your next email starts here!',
+        placeholder: placeholder || 'Your next email starts here',
       }),
     ],
     // Only initialize with content if starting in visual mode
@@ -197,15 +216,6 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
     setShowModeWarningDialog(false);
   };
 
-  const stayInHtmlMode = () => {
-    // Explicitly stay in HTML mode and just close the dialog
-    setShowModeWarningDialog(false);
-    // Ensure we're in HTML mode
-    if (mode !== 'html') {
-      setMode('html');
-    }
-  };
-
   const handleHtmlChange = (newHtml: string) => {
     setHtmlContent(newHtml);
     onChange(newHtml);
@@ -244,7 +254,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         setShowImageDialog(false);
       } catch (error) {
         console.error('Failed to upload image:', error);
-        alert('Failed to upload image. Please try again.');
+        alert('Couldn’t upload the image. Try again.');
       }
     }
   };
@@ -385,7 +395,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
             onValueChange={val => setSelectedContactId(val === 'none' ? '' : val)}
           >
             <SelectTrigger id="preview-contact" className="h-8 w-full sm:w-[200px] text-xs">
-              <SelectValue placeholder="Select contact..." />
+              <SelectValue placeholder="Select contact…" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="none">
@@ -400,6 +410,42 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
           </Select>
         </div>
       </div>
+
+      {/* Template syntax errors, reported as you type rather than on save */}
+      {syntaxIssue && !suggestionOpen && (
+        <div className="flex items-start gap-2 border-t border-red-200 bg-red-50 px-4 py-2.5">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-600" />
+          <div className="min-w-0 space-y-1">
+            <p className="text-xs font-medium text-red-800">{syntaxIssue.message}</p>
+            {syntaxIssue.excerpt && (
+              <code className="block truncate rounded border border-red-200 bg-white px-1.5 py-0.5 font-mono text-xs text-red-900">
+                {syntaxIssue.excerpt}
+              </code>
+            )}
+            <p className="text-[11px] text-red-700">
+              {/* Line numbers only exist in the HTML editor's gutter. */}
+              {mode === 'html' && syntaxIssue.line !== undefined
+                ? `Line ${syntaxIssue.line}, column ${syntaxIssue.column} — saving will fail until this is fixed.`
+                : 'Saving will fail until this is fixed.'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Field references that parse but will not resolve */}
+      {!syntaxIssue && !suggestionOpen && fieldWarnings.length > 0 && (
+        <div className="flex items-start gap-2 border-t border-amber-200 bg-amber-50 px-4 py-2.5">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+          <div className="min-w-0 space-y-1">
+            {fieldWarnings.map(warning => (
+              <p key={warning.field} className="text-xs text-amber-900">
+                {warning.message}
+              </p>
+            ))}
+            <p className="text-[11px] text-amber-700">This still sends. Nothing here blocks saving.</p>
+          </div>
+        </div>
+      )}
 
       {/* Editor content */}
       {mode === 'visual' ? (
@@ -502,7 +548,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
                         minHeight: '400px',
                         height: '100%',
                       }}
-                      title="Email Preview"
+                      title="Email preview"
                     />
                   </div>
                 </div>
@@ -516,7 +562,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
             <HtmlEditor
               value={htmlContent}
               onChange={handleHtmlChange}
-              placeholder={placeholder || 'Your next email starts here!'}
+              placeholder={placeholder || 'Your next email starts here'}
             />
           </div>
           {selectedContactId && (
@@ -608,7 +654,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
                         minHeight: '400px',
                         height: '100%',
                       }}
-                      title="Email Preview"
+                      title="Email preview"
                     />
                   </div>
                 </div>
@@ -622,7 +668,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
       <Dialog open={showVariableDialog} onOpenChange={setShowVariableDialog}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Insert Variable</DialogTitle>
+            <DialogTitle>Insert variable</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <div>
@@ -697,7 +743,7 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
                   disabled={!customVariable}
                   className="w-full"
                 >
-                  Insert Variable
+                  Insert variable
                 </Button>
               </div>
               <p className="text-xs text-neutral-500 mt-2">
@@ -710,52 +756,31 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
         </DialogContent>
       </Dialog>
 
-      {/* Mode switch warning dialog */}
-      <Dialog
+      <ConfirmDialog
         open={showModeWarningDialog}
-        onOpenChange={open => {
-          // Only allow closing (not opening) and ensure we stay in current mode
-          if (!open) {
-            setShowModeWarningDialog(false);
-          }
-        }}
-      >
-        <DialogContent className="sm:max-w-xl">
-          <DialogHeader>
-            <DialogTitle>Custom HTML Detected</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <p className="text-sm text-neutral-700">
-              Your HTML contains custom formatting, styles, or elements that the visual editor doesn&apos;t support.
-              Switching to visual mode will cause these customizations to be lost or modified.
-            </p>
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
-              <p className="text-sm text-amber-800 font-medium">This may affect:</p>
-              <ul className="text-sm text-amber-700 mt-2 ml-4 list-disc space-y-1">
-                <li>Custom HTML elements and attributes</li>
-                <li>Inline styles and CSS classes</li>
-                <li>Complex table structures</li>
-                <li>Custom formatting or layout</li>
-              </ul>
-            </div>
-
-            <div className="flex gap-2 justify-end">
-              <Button type="button" variant="outline" onClick={stayInHtmlMode}>
-                Stay in HTML Mode
-              </Button>
-              <Button type="button" variant="destructive" onClick={switchToVisualMode}>
-                Switch Anyway
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
+        onOpenChange={setShowModeWarningDialog}
+        onConfirm={switchToVisualMode}
+        title="Switch to the visual editor?"
+        description="The visual editor may strip or rewrite parts of your HTML, such as:"
+        details={
+          <ul className="list-disc space-y-1 rounded-lg border border-neutral-200 py-2.5 pl-8 pr-3 text-sm text-neutral-600 marker:text-neutral-300">
+            <li>Custom HTML elements and attributes</li>
+            <li>Inline styles and CSS classes</li>
+            <li>Complex table structures</li>
+            <li>Custom formatting or layout</li>
+          </ul>
+        }
+        icon={AlertTriangle}
+        cancelText="Stay in HTML"
+        confirmText="Switch anyway"
+        variant="destructive"
+      />
 
       {/* Image insertion dialog */}
       <Dialog open={showImageDialog} onOpenChange={setShowImageDialog}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Insert Image</DialogTitle>
+            <DialogTitle>Insert image</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <div>
@@ -850,6 +875,22 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
           font-size: 14px;
         }
 
+        /*
+         * Logic tags are structure, not data, so they read as a different kind of thing
+         * from the blue value chips above rather than as a second accent colour.
+         * Decoration-only: these never appear in the sent email, where the tag has
+         * already been rendered away.
+         */
+        .logic-highlight {
+          background-color: #f5f5f5;
+          color: #171717;
+          padding: 2px 6px;
+          border-radius: 3px;
+          border: 1px solid #e5e5e5;
+          font-family: 'Courier New', monospace;
+          font-size: 13px;
+        }
+
         .ProseMirror table {
           border-collapse: collapse;
           width: 100%;
@@ -930,45 +971,73 @@ export function EmailEditor({value, onChange, placeholder, subject, from, replyT
           padding: 0;
         }
 
-        .variable-suggestion-list {
-          min-width: 200px;
+        .suggestion-menu {
+          width: 320px;
+          display: flex;
+          flex-direction: column;
+          gap: 1px;
         }
 
-        .suggestion-item {
+        .suggestion-row {
           display: flex;
-          align-items: center;
-          padding: 8px 12px;
+          flex-direction: column;
+          gap: 2px;
+          padding: 7px 10px;
           cursor: pointer;
           border-radius: 4px;
-          transition: background-color 0.15s;
+          /* Selection follows the pointer, so this only ever paints one row. */
+          transition: background-color 0.12s ease-out;
         }
 
-        .suggestion-item:hover,
-        .suggestion-item.is-selected {
-          background-color: #e5e7eb;
+        /* Matches the focus:bg-neutral-100 used by Select and DropdownMenu: the same
+           gesture gets the same highlight. Legible on its own because pointer movement
+           moves the selection, so this is the only painted row rather than one of two
+           competing ones. */
+        .suggestion-row.is-selected {
+          background-color: #f5f5f5;
         }
 
-        .suggestion-item:hover code,
-        .suggestion-item.is-selected code {
-          background-color: #dbeafe;
-          color: #1e3a8a;
+        .suggestion-row-head {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 12px;
         }
 
-        .suggestion-item code {
-          font-size: 14px;
+        .suggestion-row-label {
+          font-size: 13px;
+          line-height: 1.3;
+          color: #171717;
+        }
+
+        .suggestion-row-meta {
+          flex-shrink: 0;
+          font-size: 11px;
+          color: #525252;
+          font-variant-numeric: tabular-nums;
+        }
+
+        .suggestion-row-syntax {
           font-family: 'Courier New', monospace;
-          font-weight: 500;
-          color: #1f2937;
-          background-color: #f3f4f6;
-          padding: 4px 8px;
-          border-radius: 4px;
+          font-size: 11px;
+          line-height: 1.3;
+          color: #525252;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
 
-        .suggestion-item-empty {
+        .suggestion-empty {
           padding: 12px;
           text-align: center;
-          color: #9ca3af;
+          color: #525252;
           font-size: 13px;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          .suggestion-row {
+            transition: none;
+          }
         }
 
         .variable-mention {

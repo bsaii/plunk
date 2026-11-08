@@ -1,0 +1,426 @@
+/**
+ * Protocol-level tests: a real MCP client driven against the real server over
+ * the SDK's in-process handler, with only the Plunk API mocked. This is what
+ * catches registration and guardrail regressions that unit tests would miss.
+ */
+
+import {Client, StreamableHTTPClientTransport} from '@modelcontextprotocol/client';
+import {createMcpHandler} from '@modelcontextprotocol/server';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+
+import type {PlunkMcpConfig} from '../config.js';
+import {buildServer} from '../server.js';
+
+const baseConfig: PlunkMcpConfig = {
+  apiKey: 'sk_test',
+  apiUrl: 'https://api.example.com',
+  readOnly: false,
+};
+
+async function connect(config: PlunkMcpConfig) {
+  const handler = createMcpHandler(() => buildServer(config));
+
+  const transport = new StreamableHTTPClientTransport(new URL('http://test.local/mcp'), {
+    fetch: (url: string | URL | Request, init?: RequestInit) => handler.fetch(new Request(url, init)),
+  });
+
+  const client = new Client({name: 'test-harness', version: '1.0.0'});
+  await client.connect(transport);
+
+  return {
+    client,
+    async close() {
+      await client.close();
+      await handler.close();
+    },
+  };
+}
+
+function mockApi(handler: (url: string, init?: RequestInit) => Response) {
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+    const target = String(url instanceof Request ? url.url : url);
+
+    // Let the in-process MCP transport through untouched; only intercept Plunk.
+    if (!target.startsWith('https://api.example.com')) {
+      throw new Error(`unexpected fetch to ${target}`);
+    }
+
+    return handler(target, init as RequestInit | undefined);
+  });
+}
+
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {status, headers: {'Content-Type': 'application/json'}});
+}
+
+let realFetch: typeof globalThis.fetch;
+
+beforeEach(() => {
+  realFetch = globalThis.fetch;
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  globalThis.fetch = realFetch;
+});
+
+describe('tool registration', () => {
+  it('exposes the full public-API surface by default', async () => {
+    const {client, close} = await connect(baseConfig);
+
+    const {tools} = await client.listTools();
+    const names = tools.map((t) => t.name);
+
+    expect(names).toContain('plunk_send_email');
+    expect(names).toContain('plunk_send_campaign');
+    expect(names).toContain('plunk_delete_contact');
+    expect(names).toContain('plunk_cancel_email');
+    expect(tools).toHaveLength(45);
+
+    await close();
+  });
+
+  it('annotates every tool with a title and a read-only hint', async () => {
+    // Both are hard requirements for the Claude Connectors Directory.
+    const {client, close} = await connect(baseConfig);
+
+    const {tools} = await client.listTools();
+
+    for (const tool of tools) {
+      expect(tool.title, `${tool.name} is missing a title`).toBeTruthy();
+      expect(tool.annotations?.readOnlyHint, `${tool.name} is missing readOnlyHint`).toBeTypeOf('boolean');
+    }
+
+    await close();
+  });
+
+  it('marks the irreversible tools destructive', async () => {
+    const {client, close} = await connect(baseConfig);
+
+    const {tools} = await client.listTools();
+    const destructive = tools.filter((t) => t.annotations?.destructiveHint).map((t) => t.name);
+
+    expect(destructive.sort()).toEqual([
+      'plunk_cancel_campaign',
+      'plunk_cancel_email',
+      'plunk_cancel_workflow_executions',
+      'plunk_delete_contact',
+      'plunk_delete_workflow',
+      'plunk_delete_workflow_step',
+      'plunk_disconnect_workflow_steps',
+      'plunk_send_campaign',
+    ]);
+
+    await close();
+  });
+
+  it('returns tools in a stable order across builds', async () => {
+    const first = await connect(baseConfig);
+    const a = (await first.client.listTools()).tools.map((t) => t.name);
+    await first.close();
+
+    const second = await connect(baseConfig);
+    const b = (await second.client.listTools()).tools.map((t) => t.name);
+    await second.close();
+
+    expect(a).toEqual(b);
+  });
+});
+
+describe('read-only mode', () => {
+  it('hides every mutating tool from tools/list', async () => {
+    const {client, close} = await connect({...baseConfig, readOnly: true});
+
+    const {tools} = await client.listTools();
+
+    expect(tools.every((t) => t.annotations?.readOnlyHint === true)).toBe(true);
+    expect(tools.map((t) => t.name)).not.toContain('plunk_send_campaign');
+
+    await close();
+  });
+
+  it('makes a hidden tool uncallable, not merely invisible', async () => {
+    const {client, close} = await connect({...baseConfig, readOnly: true});
+
+    // An unregistered tool is a protocol error, so the model cannot reach it by
+    // guessing the name after seeing it in a previous non-read-only session.
+    await expect(
+      client.callTool({name: 'plunk_send_campaign', arguments: {id: 'abc'}}),
+    ).rejects.toThrow();
+
+    await close();
+  });
+});
+
+describe('tool behaviour', () => {
+  it('lists contacts and reports the total', async () => {
+    mockApi(() => json({data: [{id: '1', email: 'ada@example.com'}], cursor: null, hasMore: false, total: 1}));
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({name: 'plunk_list_contacts', arguments: {}});
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.stringify(result.content)).toContain('ada@example.com');
+
+    await close();
+  });
+
+  it('steers toward filtering instead of blind paging when truncated', async () => {
+    mockApi(() => json({data: [{id: '1'}], cursor: 'next-cursor', hasMore: true, total: 5000}));
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({name: 'plunk_list_contacts', arguments: {}});
+
+    expect(JSON.stringify(result.content)).toMatch(/narrowing the search/i);
+
+    await close();
+  });
+
+  it('lists segments from the bare array GET /segments returns', async () => {
+    const calls: string[] = [];
+
+    mockApi((url) => {
+      calls.push(url);
+      return json([{id: 'seg-1', name: 'VIP', type: 'DYNAMIC', memberCount: 12}]);
+    });
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({name: 'plunk_list_segments', arguments: {}});
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.stringify(result.content)).toContain('Found 1 segment(s).');
+    expect(JSON.stringify(result.content)).toContain('VIP');
+    // The endpoint is not paginated, so no limit/cursor should be sent.
+    expect(calls).toEqual(['https://api.example.com/segments']);
+
+    await close();
+  });
+
+  it('turns an API failure into a readable tool error rather than throwing', async () => {
+    mockApi(() => json({error: {code: 'NOT_FOUND', message: 'Contact not found'}}, 404));
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({name: 'plunk_get_contact', arguments: {id: 'missing'}});
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain('Contact not found');
+
+    await close();
+  });
+
+  it('rejects a send with neither template nor subject/body before calling the API', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch');
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({
+      name: 'plunk_send_email',
+      arguments: {to: 'ada@example.com'},
+    });
+
+    expect(result.isError).toBe(true);
+    expect(spy.mock.calls.filter(([u]) => String(u).includes('api.example.com'))).toHaveLength(0);
+
+    await close();
+  });
+
+  it('rejects a SEGMENT campaign with no segmentId', async () => {
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({
+      name: 'plunk_create_campaign',
+      arguments: {
+        name: 'n',
+        subject: 's',
+        body: 'b',
+        from: 'a@example.com',
+        audienceType: 'SEGMENT',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain('plunk_list_segments');
+
+    await close();
+  });
+
+  it('tracks an event via the contact upsert when no public key is configured', async () => {
+    const calls: string[] = [];
+
+    mockApi((url) => {
+      calls.push(url);
+      return url.endsWith('/contacts') ? json({id: 'contact-1'}) : json({ok: true});
+    });
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({
+      name: 'plunk_track_event',
+      arguments: {event: 'user.signup', email: 'ada@example.com'},
+    });
+
+    expect(result.isError).toBeFalsy();
+    // /v1/track needs a public key, so the secret-key path must go the long way.
+    expect(calls).toEqual(['https://api.example.com/contacts', 'https://api.example.com/events/track']);
+
+    await close();
+  });
+
+  it('uses /v1/track directly when a public key is configured', async () => {
+    const calls: string[] = [];
+
+    mockApi((url) => {
+      calls.push(url);
+      return json({ok: true});
+    });
+
+    const {client, close} = await connect({...baseConfig, publicKey: 'pk_test'});
+
+    await client.callTool({
+      name: 'plunk_track_event',
+      arguments: {event: 'user.signup', email: 'ada@example.com'},
+    });
+
+    expect(calls).toEqual(['https://api.example.com/v1/track']);
+
+    await close();
+  });
+});
+
+describe('addressing contacts by email', () => {
+  it('resolves an email to the exact contact before patching it', async () => {
+    const calls: {url: string; method?: string; body?: string}[] = [];
+
+    mockApi((url, init) => {
+      calls.push({url, method: init?.method, body: init?.body as string | undefined});
+
+      if (url.includes('/contacts?')) {
+        // A substring search legitimately returns near-misses; the tool must not
+        // patch whichever one came back first.
+        return json({
+          data: [
+            {id: 'wrong', email: 'ada@example.com.au', subscribed: true},
+            {id: 'right', email: 'ada@example.com', subscribed: true},
+          ],
+          cursor: null,
+          hasMore: false,
+          total: 2,
+        });
+      }
+
+      return json({id: 'right', email: 'ada@example.com', subscribed: false});
+    });
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({
+      name: 'plunk_unsubscribe_contact',
+      arguments: {email: 'Ada@Example.com'},
+    });
+
+    expect(result.isError).toBeFalsy();
+
+    const patch = calls.find((call) => call.method === 'PATCH');
+    expect(patch?.url).toBe('https://api.example.com/contacts/right');
+    expect(JSON.parse(patch?.body ?? '{}')).toEqual({subscribed: false});
+
+    await close();
+  });
+
+  it('reports a missing email without patching anything', async () => {
+    mockApi((url) => {
+      if (url.includes('/contacts?')) {
+        return json({data: [], cursor: null, hasMore: false, total: 0});
+      }
+
+      throw new Error('must not write when the contact does not exist');
+    });
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({
+      name: 'plunk_unsubscribe_contact',
+      arguments: {email: 'nobody@example.com'},
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain('No contact found');
+
+    await close();
+  });
+
+  it('rejects being given both an id and an email', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch');
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({
+      name: 'plunk_subscribe_contact',
+      arguments: {id: 'abc', email: 'ada@example.com'},
+    });
+
+    expect(result.isError).toBe(true);
+    expect(spy.mock.calls.filter(([u]) => String(u).includes('api.example.com'))).toHaveLength(0);
+
+    await close();
+  });
+});
+
+describe('single-campaign envelope', () => {
+  it('unwraps {success, data} so campaign fields are readable', async () => {
+    mockApi(() => json({success: true, data: {id: 'camp-1', name: 'Win-back', status: 'DRAFT'}}));
+
+    const {client, close} = await connect(baseConfig);
+
+    const result = await client.callTool({name: 'plunk_get_campaign', arguments: {id: 'camp-1'}});
+
+    // The model must see the campaign, not a {success, data} wrapper around it.
+    expect(result.structuredContent).toMatchObject({id: 'camp-1', name: 'Win-back', status: 'DRAFT'});
+
+    await close();
+  });
+});
+
+describe('page-based lists', () => {
+  // GET /campaigns and GET /templates take page/pageSize, unlike the cursor-paginated contact list.
+  it.each([
+    ['plunk_list_campaigns', '/campaigns', 'campaign'],
+    ['plunk_list_templates', '/templates', 'template'],
+  ])('%s pages by page/pageSize and points to the next page', async (tool, path, noun) => {
+    const calls: URL[] = [];
+
+    mockApi((url) => {
+      const target = new URL(url);
+      calls.push(target);
+      const page = Number(target.searchParams.get('page'));
+      const pageSize = Number(target.searchParams.get('pageSize'));
+      return json({data: [{id: `item-${page}`}], total: 12, page, pageSize, totalPages: Math.ceil(12 / pageSize)});
+    });
+
+    const {client, close} = await connect(baseConfig);
+
+    const first = await client.callTool({name: tool, arguments: {limit: 5}});
+    const middle = await client.callTool({name: tool, arguments: {limit: 5, page: 2}});
+    const last = await client.callTool({name: tool, arguments: {limit: 5, page: 3}});
+
+    expect(calls.map((c) => c.pathname)).toEqual([path, path, path]);
+    expect(calls.map((c) => Object.fromEntries(c.searchParams))).toEqual([
+      {page: '1', pageSize: '5'},
+      {page: '2', pageSize: '5'},
+      {page: '3', pageSize: '5'},
+    ]);
+    expect(JSON.stringify(first.content)).toContain('pass page=2');
+    expect(middle.isError).toBeFalsy();
+    expect(JSON.stringify(middle.content)).toContain(`Found 12 ${noun}(s); showing 1.`);
+    expect(JSON.stringify(middle.content)).toContain('pass page=3');
+    expect(last.isError).toBeFalsy();
+    expect(JSON.stringify(last.content)).toContain(`Found 12 ${noun}(s); showing 1.`);
+    expect(JSON.stringify(last.content)).not.toContain('More results exist');
+
+    await close();
+  });
+});

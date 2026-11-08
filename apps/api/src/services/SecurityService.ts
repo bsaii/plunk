@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 
+import {EmailStatus} from '@plunk/db';
 import {ProjectDisabledEmail, sendPlatformEmail} from '@plunk/email';
 import React from 'react';
 import signale from 'signale';
@@ -10,6 +11,7 @@ import {Keys} from './keys.js';
 import {MembershipService} from './MembershipService.js';
 import {NtfyService} from './NtfyService.js';
 import {QueueService} from './QueueService.js';
+import {getAwsAccountId} from './SESService.js';
 import {
   AUTO_PROJECT_DISABLE,
   DASHBOARD_URI,
@@ -128,6 +130,11 @@ interface RateData {
   complaintRate: number;
 }
 
+/**
+ * The two things a reputation threshold can measure, and the two events that move them.
+ */
+type SecurityMetric = 'bounce' | 'complaint';
+
 interface SecurityStatus {
   projectId: string;
   isHealthy: boolean;
@@ -138,6 +145,9 @@ interface SecurityStatus {
   isNewProject: boolean;
   violations: string[];
   warnings: string[];
+  // Which metrics have at least one critical violation. Internal: enforcement uses it to
+  // act only on the metric the triggering event moved; never sent to the dashboard.
+  criticalByMetric: Record<SecurityMetric, boolean>;
 }
 
 const SNS_CERT_HOST_RE = /^sns\.[a-z0-9-]+\.amazonaws\.(com|cn)$/;
@@ -167,8 +177,42 @@ function buildSnsStringToSign(message: Record<string, string>): string {
     .join('');
 }
 
+/**
+ * The account id in an SNS topic ARN (`arn:aws:sns:<region>:<account>:<topic>`), or
+ * undefined when the value is not an SNS topic ARN.
+ */
+export function snsTopicAccountId(topicArn: unknown): string | undefined {
+  if (typeof topicArn !== 'string') return undefined;
+
+  const [prefix, , service, , account, topic] = topicArn.split(':');
+  if (prefix !== 'arn' || service !== 'sns' || !account || !topic) return undefined;
+
+  return account;
+}
+
 export class SecurityService {
   private static readonly CACHE_TTL = 300; // 5 minutes
+
+  /**
+   * Whether a verified SNS message comes from a topic in the AWS account Plunk sends
+   * from. A valid signature only proves AWS delivered the message: anyone can create
+   * a topic in their own account, subscribe this webhook to it and publish SES-shaped
+   * events. `TopicArn` is part of the signed payload, so its account can be trusted.
+   *
+   * Returns 'unknown' when the account lookup fails, so the caller can ask SNS to
+   * retry instead of accepting or permanently dropping the message.
+   */
+  public static async snsTopicOrigin(topicArn: unknown): Promise<'own' | 'foreign' | 'unknown'> {
+    const topicAccount = snsTopicAccountId(topicArn);
+    if (!topicAccount) return 'foreign';
+
+    try {
+      return topicAccount === (await getAwsAccountId()) ? 'own' : 'foreign';
+    } catch (error) {
+      signale.error('[SNS] Could not look up the AWS account to check the topic against:', error);
+      return 'unknown';
+    }
+  }
 
   /**
    * Verify an AWS SNS message signature. Returns false if the cert URL is
@@ -261,26 +305,34 @@ export class SecurityService {
         isNewProject: false,
         violations: [],
         warnings: [],
+        criticalByMetric: {bounce: false, complaint: false},
       };
     }
   }
 
   /**
-   * Check security status and auto-disable project if thresholds are exceeded
-   * This should be called after bounce/complaint events are processed
+   * Check security status after a new bounce or complaint, and auto-disable the project if
+   * that event pushed its own metric past a critical threshold.
+   *
+   * Only violations of the `trigger` metric can disable. The complaint rate is complaints
+   * over total sent, so a bounce cannot raise it (and every send only lowers it); the same
+   * holds the other way round. A critical violation of the other metric was therefore
+   * already there when its own last event arrived, and was judged then. Acting on it again
+   * here is what re-disabled projects on their next bounce after a manual re-enable.
    */
-  public static async checkAndEnforceSecurityLimits(projectId: string): Promise<void> {
+  public static async checkAndEnforceSecurityLimits(projectId: string, trigger: SecurityMetric): Promise<void> {
     try {
       // Invalidate cache to get fresh data
       await this.invalidateCache(projectId);
 
       // Get current security status
       const status = await this.getSecurityStatus(projectId);
+      const shouldDisable = status.criticalByMetric[trigger];
 
       // If project should be disabled, disable it (only if auto-disable is enabled)
-      if (status.shouldDisable && AUTO_PROJECT_DISABLE) {
+      if (shouldDisable && AUTO_PROJECT_DISABLE) {
         await this.disableProject(projectId, status);
-      } else if (status.shouldDisable && !AUTO_PROJECT_DISABLE) {
+      } else if (shouldDisable && !AUTO_PROJECT_DISABLE) {
         // Log critical violations but don't auto-disable (self-hosted mode)
         const project = await prisma.project.findUnique({
           where: {id: projectId},
@@ -310,6 +362,12 @@ export class SecurityService {
           // Send notification about critical security violations
           await NtfyService.notifySecurityWarning(project.name, projectId, status.violations);
         }
+      } else if (status.shouldDisable) {
+        // Critical, but only on the metric this event did not move: already judged, not re-enforced.
+        signale.warn(
+          `[SECURITY] Project ${projectId} has critical violations unrelated to this ${trigger}; not enforcing:`,
+          status.violations,
+        );
       } else if (status.warnings.length > 0) {
         // Log warnings for monitoring
         signale.warn(`[SECURITY] Project ${projectId} has security warnings:`, status.warnings);
@@ -372,7 +430,7 @@ export class SecurityService {
    * Does NOT expose internal thresholds — only computed health levels
    */
   public static async getProjectSecurityMetrics(projectId: string): Promise<{
-    status: SecurityStatus;
+    status: Omit<SecurityStatus, 'criticalByMetric'>;
     levels: {
       bounce7Day: 'healthy' | 'warning' | 'critical';
       bounceAllTime: 'healthy' | 'warning' | 'critical';
@@ -392,8 +450,10 @@ export class SecurityService {
     // Strip internal details from the client-facing response:
     // - Replace detailed violation/warning messages (they contain exact thresholds)
     // - Remove 24-hour data and new project flag (reveals enforcement windows)
-    const sanitizedStatus: SecurityStatus = {
-      ...status,
+    // - Drop the internal per-metric enforcement flags
+    const {criticalByMetric: _criticalByMetric, ...publicStatus} = status;
+    const sanitizedStatus: Omit<SecurityStatus, 'criticalByMetric'> = {
+      ...publicStatus,
       twentyFourHour: {total: 0, bounces: 0, complaints: 0, bounceRate: 0, complaintRate: 0},
       isNewProject: false,
       violations: status.violations.map(() => 'Security threshold exceeded'),
@@ -444,6 +504,21 @@ export class SecurityService {
   private static async calculateRates(projectId: string, startDate?: Date): Promise<RateData> {
     const where = {
       projectId,
+      // Mail to the SES mailbox simulator is excluded from both sides of every rate: it
+      // never leaves AWS, and AWS itself keeps it out of bounce rates, complaint rates,
+      // sending quotas and reputation metrics. Counting a deliberate
+      // `bounce@simulator.amazonses.com` test here would let a sender rehearsing their
+      // bounce handling warn or auto-disable their own project. Excluding it from the
+      // denominator as well as the numerator is the part that is easy to miss: dropping
+      // only the bounces would leave the test sends inflating the denominator and quietly
+      // understating the real bounce rate.
+      //
+      // Nothing else changes for these emails -- the webhook fires, the activity feed
+      // shows the bounce, the contact is still suppressed.
+      simulated: false,
+      // A scheduled email has not been sent and a cancelled one never will be. Counting them
+      // would let a sender dilute a real bounce rate by scheduling mail it then cancels.
+      status: {notIn: [EmailStatus.SCHEDULED, EmailStatus.CANCELLED]},
       ...(startDate && {
         createdAt: {
           gte: startDate,
@@ -506,6 +581,7 @@ export class SecurityService {
 
     const violations: string[] = [];
     const warnings: string[] = [];
+    const criticalByMetric: Record<SecurityMetric, boolean> = {bounce: false, complaint: false};
 
     // === Absolute count ceiling checks (new projects only, rate-independent) ===
     // Catches new accounts blasting emails before their bounce rate catches up.
@@ -517,6 +593,7 @@ export class SecurityService {
         violations.push(
           `24-hour bounce count (new project) (${twentyFourHour.bounces} bounces) exceeds critical ceiling (${SECURITY_THRESHOLDS.NEW_PROJECT_BOUNCE_24H_CEILING_CRITICAL})`,
         );
+        criticalByMetric.bounce = true;
       } else if (twentyFourHour.bounces >= SECURITY_THRESHOLDS.NEW_PROJECT_BOUNCE_24H_CEILING_WARNING) {
         warnings.push(
           `24-hour bounce count (new project) (${twentyFourHour.bounces} bounces) exceeds warning ceiling (${SECURITY_THRESHOLDS.NEW_PROJECT_BOUNCE_24H_CEILING_WARNING})`,
@@ -528,6 +605,7 @@ export class SecurityService {
         violations.push(
           `7-day bounce count (new project) (${sevenDay.bounces} bounces) exceeds critical ceiling (${SECURITY_THRESHOLDS.NEW_PROJECT_BOUNCE_7DAY_CEILING_CRITICAL})`,
         );
+        criticalByMetric.bounce = true;
       } else if (sevenDay.bounces >= SECURITY_THRESHOLDS.NEW_PROJECT_BOUNCE_7DAY_CEILING_WARNING) {
         warnings.push(
           `7-day bounce count (new project) (${sevenDay.bounces} bounces) exceeds warning ceiling (${SECURITY_THRESHOLDS.NEW_PROJECT_BOUNCE_7DAY_CEILING_WARNING})`,
@@ -539,6 +617,7 @@ export class SecurityService {
         violations.push(
           `24-hour complaint count (new project) (${twentyFourHour.complaints} complaints) exceeds critical ceiling (${SECURITY_THRESHOLDS.NEW_PROJECT_COMPLAINT_24H_CEILING_CRITICAL})`,
         );
+        criticalByMetric.complaint = true;
       } else if (twentyFourHour.complaints >= SECURITY_THRESHOLDS.NEW_PROJECT_COMPLAINT_24H_CEILING_WARNING) {
         warnings.push(
           `24-hour complaint count (new project) (${twentyFourHour.complaints} complaints) exceeds warning ceiling (${SECURITY_THRESHOLDS.NEW_PROJECT_COMPLAINT_24H_CEILING_WARNING})`,
@@ -550,6 +629,7 @@ export class SecurityService {
         violations.push(
           `7-day complaint count (new project) (${sevenDay.complaints} complaints) exceeds critical ceiling (${SECURITY_THRESHOLDS.NEW_PROJECT_COMPLAINT_7DAY_CEILING_CRITICAL})`,
         );
+        criticalByMetric.complaint = true;
       } else if (sevenDay.complaints >= SECURITY_THRESHOLDS.NEW_PROJECT_COMPLAINT_7DAY_CEILING_WARNING) {
         warnings.push(
           `7-day complaint count (new project) (${sevenDay.complaints} complaints) exceeds warning ceiling (${SECURITY_THRESHOLDS.NEW_PROJECT_COMPLAINT_7DAY_CEILING_WARNING})`,
@@ -571,6 +651,7 @@ export class SecurityService {
         violations.push(
           `7-day bounce rate (${sevenDay.bounceRate.toFixed(2)}%, ${sevenDay.bounces} bounces) exceeds critical threshold (${SECURITY_THRESHOLDS.BOUNCE_7DAY_CRITICAL}%, ${SECURITY_THRESHOLDS.MIN_BOUNCES_FOR_CRITICAL} minimum)`,
         );
+        criticalByMetric.bounce = true;
       } else if (
         sevenDay.bounceRate >= SECURITY_THRESHOLDS.BOUNCE_7DAY_WARNING &&
         sevenDay.bounces >= SECURITY_THRESHOLDS.MIN_BOUNCES_FOR_WARNING
@@ -590,6 +671,7 @@ export class SecurityService {
         violations.push(
           `7-day complaint rate (${sevenDay.complaintRate.toFixed(3)}%, ${sevenDay.complaints} complaints) exceeds critical threshold (${SECURITY_THRESHOLDS.COMPLAINT_7DAY_CRITICAL}%, ${SECURITY_THRESHOLDS.MIN_COMPLAINTS_FOR_CRITICAL} minimum)`,
         );
+        criticalByMetric.complaint = true;
       } else if (
         sevenDay.complaintRate >= SECURITY_THRESHOLDS.COMPLAINT_7DAY_WARNING &&
         sevenDay.complaints >= SECURITY_THRESHOLDS.MIN_COMPLAINTS_FOR_WARNING
@@ -609,6 +691,7 @@ export class SecurityService {
         violations.push(
           `All-time bounce rate (${allTime.bounceRate.toFixed(2)}%, ${allTime.bounces} bounces) exceeds critical threshold (${SECURITY_THRESHOLDS.BOUNCE_ALLTIME_CRITICAL}%, ${SECURITY_THRESHOLDS.MIN_BOUNCES_FOR_CRITICAL} minimum)`,
         );
+        criticalByMetric.bounce = true;
       } else if (
         allTime.bounceRate >= SECURITY_THRESHOLDS.BOUNCE_ALLTIME_WARNING &&
         allTime.bounces >= SECURITY_THRESHOLDS.MIN_BOUNCES_FOR_WARNING
@@ -625,6 +708,7 @@ export class SecurityService {
         violations.push(
           `All-time complaint rate (${allTime.complaintRate.toFixed(3)}%, ${allTime.complaints} complaints) exceeds critical threshold (${SECURITY_THRESHOLDS.COMPLAINT_ALLTIME_CRITICAL}%, ${SECURITY_THRESHOLDS.MIN_COMPLAINTS_FOR_CRITICAL} minimum)`,
         );
+        criticalByMetric.complaint = true;
       } else if (
         allTime.complaintRate >= SECURITY_THRESHOLDS.COMPLAINT_ALLTIME_WARNING &&
         allTime.complaints >= SECURITY_THRESHOLDS.MIN_COMPLAINTS_FOR_WARNING
@@ -645,6 +729,7 @@ export class SecurityService {
       isNewProject,
       violations,
       warnings,
+      criticalByMetric,
     };
   }
 
@@ -707,10 +792,18 @@ export class SecurityService {
         const members = await MembershipService.getMembers(projectId);
         const emails = members.map(m => m.email);
         if (emails.length > 0) {
+          const metrics = (Object.keys(status.criticalByMetric) as SecurityMetric[]).filter(
+            m => status.criticalByMetric[m],
+          );
+          // Bounce/complaint rates are visible in the dashboard, so the email names them.
+          // Thresholds and the new-project 24h window stay internal.
           const template = React.createElement(ProjectDisabledEmail, {
             projectName: project.name,
             projectId,
-            violations: status.violations,
+            reason: 'reputation',
+            metrics: metrics.length > 0 ? metrics : ['bounce', 'complaint'],
+            sevenDay: status.sevenDay,
+            allTime: status.allTime,
             dashboardUrl: DASHBOARD_URI,
             landingUrl: LANDING_URI,
           });
@@ -996,10 +1089,11 @@ ${strippedBody.substring(0, 2000)}`,
         const members = await MembershipService.getMembers(projectId);
         const emails = members.map(m => m.email);
         if (emails.length > 0) {
+          // Deliberately vague: never tell the sender their content was flagged as phishing
           const template = React.createElement(ProjectDisabledEmail, {
             projectName: project.name,
             projectId,
-            violations: [violation],
+            reason: 'policy',
             dashboardUrl: DASHBOARD_URI,
             landingUrl: LANDING_URI,
           });

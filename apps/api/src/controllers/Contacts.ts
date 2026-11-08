@@ -2,9 +2,13 @@ import {Controller, Delete, Get, Middleware, Patch, Post} from '@overnightjs/cor
 import type {NextFunction, Request, Response} from 'express';
 import multer from 'multer';
 import {ContactSchemas} from '@plunk/shared';
-import type {BulkContactActionSelector} from '@plunk/types';
+import type {BulkContactActionSelector, ContactSubscriptionStatus} from '@plunk/types';
+import {CONTACT_SUBSCRIPTION_STATUSES} from '@plunk/types';
 import signale from 'signale';
 import {requireAuth, requireEmailVerified} from '../middleware/auth.js';
+import {contactWriteRateLimit} from '../middleware/rateLimit.js';
+import {HttpException} from '../exceptions/index.js';
+import {ContactFieldService} from '../services/ContactFieldService.js';
 import {ContactService} from '../services/ContactService.js';
 import {QueueService} from '../services/QueueService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
@@ -24,6 +28,19 @@ const upload = multer({
   },
 });
 
+/**
+ * Read the `e` parameter the public list-management pages forward: the id of the
+ * email the recipient acted from. Optional — mail sent before the parameter
+ * existed, and hand-built links, carry no source.
+ *
+ * Unverified here; {@link ContactService.subscribe} / {@link ContactService.unsubscribe}
+ * confirm the email belongs to the contact before recording it.
+ */
+function readSourceEmailId(req: Request): string | undefined {
+  const value = req.query.e;
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
 @Controller('contacts')
 export class Contacts {
   /**
@@ -39,9 +56,14 @@ export class Contacts {
     const cursor = req.query.cursor as string | undefined;
     const search = req.query.search as string | undefined;
 
-    // Optional status facet (?subscribed=true|false) and column sort
-    // (?sort=email|createdAt&dir=asc|desc). Anything else falls back to the
-    // default newest-first ordering with no status filter.
+    // Optional status facet and column sort (?sort=email|createdAt&dir=asc|desc). Anything
+    // else falls back to the default newest-first ordering with no status filter.
+    //
+    // Two spellings of the facet: `?status=subscribed|snoozed|unsubscribed` is the current
+    // one, and `?subscribed=true|false` is kept working for callers written before snoozing
+    // existed. `status` wins when both are present.
+    const statusParam = req.query.status as ContactSubscriptionStatus | undefined;
+    const status = statusParam && CONTACT_SUBSCRIPTION_STATUSES.includes(statusParam) ? statusParam : undefined;
     const subscribedParam = req.query.subscribed as string | undefined;
     const subscribed = subscribedParam === 'true' ? true : subscribedParam === 'false' ? false : undefined;
     const sortParam = req.query.sort as string | undefined;
@@ -49,7 +71,12 @@ export class Contacts {
     const dirParam = req.query.dir as string | undefined;
     const dir = dirParam === 'asc' ? 'asc' : dirParam === 'desc' ? 'desc' : undefined;
 
-    const result = await ContactService.list(auth.projectId!, limit, cursor, search, {subscribed, sort, dir});
+    const result = await ContactService.list(auth.projectId!, limit, cursor, search, {
+      status,
+      subscribed,
+      sort,
+      dir,
+    });
 
     return res.status(200).json(result);
   }
@@ -66,12 +93,7 @@ export class Contacts {
     const auth = res.locals.auth;
 
     try {
-      const fieldsWithTypes = await ContactService.getAvailableFields(auth.projectId!);
-
-      return res.status(200).json({
-        fields: fieldsWithTypes,
-        count: fieldsWithTypes.length,
-      });
+      return res.status(200).json(await ContactFieldService.list(auth.projectId!));
     } catch (error) {
       signale.error('[CONTACTS] Failed to get available fields:', error);
       return res.status(500).json({
@@ -139,7 +161,7 @@ export class Contacts {
    * Create or update a contact (upsert)
    */
   @Post('')
-  @Middleware([requireAuth, requireEmailVerified])
+  @Middleware([requireAuth, requireEmailVerified, contactWriteRateLimit])
   @CatchAsync
   public async create(req: Request, res: Response, _next: NextFunction) {
     const auth = res.locals.auth;
@@ -169,7 +191,7 @@ export class Contacts {
    * Update a contact
    */
   @Patch(':id')
-  @Middleware([requireAuth, requireEmailVerified])
+  @Middleware([requireAuth, requireEmailVerified, contactWriteRateLimit])
   @CatchAsync
   public async update(req: Request, res: Response, _next: NextFunction) {
     const auth = res.locals.auth;
@@ -190,7 +212,7 @@ export class Contacts {
    * Delete a contact
    */
   @Delete(':id')
-  @Middleware([requireAuth, requireEmailVerified])
+  @Middleware([requireAuth, requireEmailVerified, contactWriteRateLimit])
   @CatchAsync
   public async delete(req: Request, res: Response, _next: NextFunction) {
     const auth = res.locals.auth;
@@ -220,8 +242,15 @@ export class Contacts {
 
     const contact = await ContactService.getById(contactId);
 
-    // Fetch project to get language preference
+    // Fetch project to get language preference and the sender name the pages print
     const project = await ContactService.getProjectByContactId(contactId);
+
+    // A contact always belongs to a project, so this only happens if the contact was deleted
+    // between the two lookups. Report it as gone rather than rendering a sentence with an empty
+    // sender ("emails from  at ...").
+    if (!project) {
+      throw new HttpException(404, 'Contact not found');
+    }
 
     // Get contact-level locale (overrides project language)
     const contactLocale =
@@ -237,7 +266,14 @@ export class Contacts {
       id: contact.id,
       email: contact.email,
       subscribed: contact.subscribed,
-      language: contactLocale || project?.language || 'en',
+      // Lets the snooze and manage pages tell a paused contact from a permanently
+      // unsubscribed one -- both are `subscribed: false`.
+      snoozedUntil: contact.snoozedUntil,
+      // Names the sender inside the hosted pages' copy, so a recipient can see who they are
+      // opting out of before they act. Already printed in the footer of every marketing email
+      // this contact received, so it discloses nothing the link holder has not seen.
+      projectName: project.name,
+      language: contactLocale || project.language || 'en',
     });
   }
 
@@ -254,12 +290,13 @@ export class Contacts {
       return res.status(400).json({error: 'Contact ID is required'});
     }
 
-    const contact = await ContactService.subscribe(contactId);
+    const contact = await ContactService.subscribe(contactId, {emailId: readSourceEmailId(req)});
 
     return res.status(200).json({
       id: contact.id,
       email: contact.email,
       subscribed: contact.subscribed,
+      snoozedUntil: contact.snoozedUntil,
     });
   }
 
@@ -276,12 +313,50 @@ export class Contacts {
       return res.status(400).json({error: 'Contact ID is required'});
     }
 
-    const contact = await ContactService.unsubscribe(contactId);
+    const contact = await ContactService.unsubscribe(contactId, {emailId: readSourceEmailId(req)});
 
     return res.status(200).json({
       id: contact.id,
       email: contact.email,
       subscribed: contact.subscribed,
+      snoozedUntil: contact.snoozedUntil,
+    });
+  }
+
+  /**
+   * POST /contacts/public/:id/snooze
+   * PUBLIC: Snooze a contact -- unsubscribe them until a date, then resubscribe automatically
+   * (no auth required).
+   *
+   * Offered alongside unsubscribe on the hosted pages so a recipient who only wants a break
+   * has something to choose other than leaving for good or reporting the mail as spam. The
+   * suppression is real for the whole window: a snoozed contact is `subscribed: false` and is
+   * filtered out by every send path.
+   */
+  @Post('public/:id/snooze')
+  @CatchAsync
+  public async snoozePublic(req: Request, res: Response, _next: NextFunction) {
+    const contactId = req.params.id;
+
+    if (!contactId) {
+      return res.status(400).json({error: 'Contact ID is required'});
+    }
+
+    const body = ContactSchemas.snooze.safeParse(req.body);
+
+    if (!body.success) {
+      return res.status(400).json({error: 'A valid snooze duration is required'});
+    }
+
+    const contact = await ContactService.snooze(contactId, body.data.duration, {
+      emailId: readSourceEmailId(req),
+    });
+
+    return res.status(200).json({
+      id: contact.id,
+      email: contact.email,
+      subscribed: contact.subscribed,
+      snoozedUntil: contact.snoozedUntil,
     });
   }
 

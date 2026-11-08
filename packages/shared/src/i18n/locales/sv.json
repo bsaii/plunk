@@ -2,26 +2,26 @@
   "pages": {
     "unsubscribe": {
       "title": "Avsluta prenumeration",
-      "description": "Tråkigt att du lämnar oss. Är du säker på att du vill avsluta prenumerationen för {email}?",
+      "description": "Vill du sluta få e-post från {projectName} till {email}?",
       "button": "Avsluta prenumerationen",
       "buttonLoading": "Avslutar prenumerationen...",
       "managePreferences": "Hantera inställningar istället",
       "successTitle": "Din prenumeration är avslutad",
-      "successDescription": "{email} har avslutat sin prenumeration. Du kommer inte längre att få e-post från oss.",
+      "successDescription": "{email} får inte längre e-post från {projectName}.",
       "changedMind": "Ångrat dig?",
       "subscribeAgain": "Prenumerera igen"
     },
     "subscribe": {
       "title": "Prenumerera på uppdateringar",
-      "description": "Vill du prenumerera med {email} för att få e-post?",
+      "description": "Vill du få e-post från {projectName} till {email}?",
       "button": "Prenumerera",
       "buttonLoading": "Prenumererar...",
       "successTitle": "Du prenumererar nu!",
-      "successDescription": "{email} prenumererar nu på e-post från oss."
+      "successDescription": "{email} får nu e-post från {projectName}."
     },
     "manage": {
       "title": "Hantera inställningar",
-      "description": "Hantera e-postinställningar för {email}",
+      "description": "Hantera e-posten som {projectName} skickar till {email}.",
       "subscriptionLabel": "E-postprenumeration",
       "subscribedStatus": "Du prenumererar för närvarande på e-post",
       "unsubscribedStatus": "Du prenumererar för närvarande inte på e-post",
@@ -31,9 +31,26 @@
       "subscribeToEmails": "Prenumerera på e-post",
       "disclaimer": "På den här sidan kan du hantera dina e-postinställningar. Din prenumerationsstatus uppdateras i realtid."
     },
+    "snooze": {
+      "cta": "Pausa i stället",
+      "prompt": "Hur länge vill du pausa e-posten?",
+      "duration_2_weeks": "2 veckor",
+      "duration_1_month": "1 månad",
+      "duration_6_months": "6 månader",
+      "duration_1_year": "1 år",
+      "buttonLoading": "Pausar...",
+      "cancel": "Avbryt",
+      "successTitle": "Din e-post är pausad",
+      "successDescription": "{email} får ingen e-post från {projectName} förrän {date}. Därefter återupptas utskicken automatiskt.",
+      "status": "Pausat till {date}",
+      "resume": "Återuppta nu"
+    },
     "common": {
       "loading": "Laddar...",
-      "error": "Fel"
+      "error": "Fel",
+      "loadFailed": "Vi kunde inte läsa in dina e-postinställningar. Kontrollera länken och försök igen.",
+      "actionFailed": "Något gick fel. Försök igen.",
+      "sentWith": "Skickat med {provider}"
     }
   },
   "email": {

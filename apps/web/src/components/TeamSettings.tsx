@@ -5,9 +5,9 @@ import {
   Button,
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
+  ConfirmDialog,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -40,7 +40,7 @@ import {
   IconSpinner,
 } from '@plunk/ui';
 import {MembershipSchemas} from '@plunk/shared';
-import {MoreVertical, Trash2, UserPlus} from 'lucide-react';
+import {MoreVertical, Trash2, UserMinus, UserPlus} from 'lucide-react';
 import {AnimatePresence, motion} from 'framer-motion';
 import {useForm} from 'react-hook-form';
 import {zodResolver} from '@hookform/resolvers/zod';
@@ -91,7 +91,7 @@ export function TeamSettings({projectId, currentUserRole, currentUserId}: TeamSe
 
     try {
       await network.fetch<void, typeof MembershipSchemas.addMember>('POST', `/projects/${projectId}/members`, values);
-      setSuccess('Member added successfully');
+      setSuccess('Member added');
       await mutate();
       form.reset();
       setShowAddDialog(false);
@@ -102,7 +102,7 @@ export function TeamSettings({projectId, currentUserRole, currentUserId}: TeamSe
       if (err instanceof Error) {
         setError(err.message);
       } else {
-        setError('Failed to add member');
+        setError('Couldn’t add that member. Check the email address and try again.');
       }
     } finally {
       setIsSubmitting(false);
@@ -118,7 +118,7 @@ export function TeamSettings({projectId, currentUserRole, currentUserId}: TeamSe
 
     try {
       await network.fetch('DELETE', `/projects/${projectId}/members/${memberToRemove.userId}`);
-      setSuccess('Member removed successfully');
+      setSuccess('Member removed');
       await mutate();
       setMemberToRemove(null);
 
@@ -128,7 +128,7 @@ export function TeamSettings({projectId, currentUserRole, currentUserId}: TeamSe
       if (err instanceof Error) {
         setError(err.message);
       } else {
-        setError('Failed to remove member');
+        setError('Couldn’t remove that member. Try again.');
       }
     } finally {
       setIsSubmitting(false);
@@ -145,7 +145,7 @@ export function TeamSettings({projectId, currentUserRole, currentUserId}: TeamSe
         `/projects/${projectId}/members/${userId}`,
         {role: newRole},
       );
-      setSuccess('Member role updated successfully');
+      setSuccess('Role updated');
       await mutate();
 
       // Clear success message after 3 seconds
@@ -154,7 +154,7 @@ export function TeamSettings({projectId, currentUserRole, currentUserId}: TeamSe
       if (err instanceof Error) {
         setError(err.message);
       } else {
-        setError('Failed to update member role');
+        setError('Couldn’t change that role. Try again.');
       }
     }
   };
@@ -203,8 +203,7 @@ export function TeamSettings({projectId, currentUserRole, currentUserId}: TeamSe
         <CardHeader>
           <div className="flex items-center justify-between">
             <div>
-              <CardTitle>Team Members</CardTitle>
-              <CardDescription>Manage who has access to this project</CardDescription>
+              <CardTitle>Team members</CardTitle>
             </div>
             {canManageMembers && (
               <Button
@@ -214,7 +213,7 @@ export function TeamSettings({projectId, currentUserRole, currentUserId}: TeamSe
                 }}
               >
                 <UserPlus className="mr-2 h-4 w-4" />
-                Add Member
+                Add member
               </Button>
             )}
           </div>
@@ -314,7 +313,7 @@ export function TeamSettings({projectId, currentUserRole, currentUserId}: TeamSe
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Add Team Member</DialogTitle>
+            <DialogTitle>Add team member</DialogTitle>
             <DialogDescription>
               Add a user to this project by their email address. They must have an existing account.
             </DialogDescription>
@@ -329,7 +328,7 @@ export function TeamSettings({projectId, currentUserRole, currentUserId}: TeamSe
                 name="email"
                 render={({field}) => (
                   <FormItem>
-                    <FormLabel>Email Address</FormLabel>
+                    <FormLabel>Email address</FormLabel>
                     <FormControl>
                       <Input type="email" placeholder="user@example.com" {...field} />
                     </FormControl>
@@ -378,7 +377,7 @@ export function TeamSettings({projectId, currentUserRole, currentUserId}: TeamSe
                   Cancel
                 </Button>
                 <Button type="submit" disabled={isSubmitting}>
-                  {isSubmitting ? 'Adding...' : 'Add Member'}
+                  {isSubmitting ? 'Adding…' : 'Add Member'}
                 </Button>
               </DialogFooter>
             </form>
@@ -386,26 +385,17 @@ export function TeamSettings({projectId, currentUserRole, currentUserId}: TeamSe
         </DialogContent>
       </Dialog>
 
-      {/* Remove Member Dialog */}
-      <Dialog open={!!memberToRemove} onOpenChange={() => setMemberToRemove(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Remove Team Member</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to remove <strong>{memberToRemove?.email}</strong> from this project? They will
-              immediately lose access.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setMemberToRemove(null)}>
-              Cancel
-            </Button>
-            <Button variant="destructive" onClick={handleRemoveMember} disabled={isSubmitting}>
-              {isSubmitting ? 'Removing...' : 'Remove Member'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={!!memberToRemove}
+        onOpenChange={open => !open && setMemberToRemove(null)}
+        onConfirm={handleRemoveMember}
+        title={`Remove ${memberToRemove?.email}?`}
+        description="They lose access to this project immediately. Their Plunk account is not affected."
+        icon={UserMinus}
+        confirmText="Remove member"
+        loadingText="Removing…"
+        variant="destructive"
+      />
     </div>
   );
 }

@@ -46,3 +46,29 @@ export interface IdempotencyKeyCleanupJobData {
 export interface EmailBodyCleanupJobData {
   // Empty - clears bodies for every email past the retention window
 }
+
+/**
+ * Job data for resubscribing contacts whose snooze has run out
+ * Used by: snoozeSweepQueue worker
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface SnoozeSweepJobData {
+  // Empty - sweeps every contact whose snoozedUntil has passed
+}
+
+/**
+ * Job data for re-queueing scheduled transactional emails whose time has passed
+ * Used by: scheduledEmailSweepQueue worker
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface ScheduledEmailSweepJobData {
+  // Empty - sweeps every email still SCHEDULED past its scheduledFor
+}
+
+/**
+ * Job data for measuring the coverage and type of a project's custom contact fields
+ * Used by: contactFieldsQueue worker
+ */
+export interface ContactFieldsJobData {
+  projectId: string;
+}

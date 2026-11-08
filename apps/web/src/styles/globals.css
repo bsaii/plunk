@@ -215,6 +215,28 @@
     animation-timing-function: var(--ease-out-quart);
 }
 
+/* ──────────────────────────────────────────────────────────────────────────
+   Settle
+   A short positional ease into place for content revealed in response to an
+   action (a confirmation, an expanded choice). Transform only, never opacity:
+   the element is fully visible from its first frame, so a paused or skipped
+   animation (background tab, headless render, reduced motion) costs the
+   movement and nothing else.
+   ────────────────────────────────────────────────────────────────────────── */
+
+@keyframes settle {
+    from {
+        transform: translateY(4px) scale(0.98);
+    }
+    to {
+        transform: none;
+    }
+}
+
+.animate-settle {
+    animation: settle 220ms var(--ease-out-quart) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
     *,
     ::before,

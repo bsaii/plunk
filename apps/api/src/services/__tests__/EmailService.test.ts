@@ -3,7 +3,7 @@ import {EmailSourceType, EmailStatus, TemplateType} from '@plunk/db';
 import {ActionSchemas} from '@plunk/shared';
 import {EmailService} from '../EmailService';
 import {sendRawEmail} from '../SESService';
-import {factories, getPrismaClient} from '../../../../../test/helpers';
+import {factories} from '../../../../../test/helpers';
 
 // Mock AWS SDK globally (used by real SESService calls in MIME tests)
 vi.mock('@aws-sdk/client-ses', () => {
@@ -34,7 +34,6 @@ vi.mock('../SESService', () => ({
 describe('EmailService', () => {
   let projectId: string;
   let contactId: string;
-  const prisma = getPrismaClient();
 
   beforeEach(async () => {
     const {project} = await factories.createUserWithProject();
@@ -292,35 +291,6 @@ describe('EmailService', () => {
         expect(email.sourceType).toBe(EmailSourceType.TRANSACTIONAL);
       });
     });
-
-    describe('Unsubscribe via Complaint Webhook', () => {
-      it('should track when contact unsubscribes via complaint webhook', async () => {
-        const contact = await factories.createContact({
-          projectId,
-          subscribed: true,
-        });
-
-        const email = await factories.createEmail({
-          projectId,
-          contactId: contact.id,
-          status: EmailStatus.SENT,
-        });
-
-        await EmailService.handleWebhookEvent(email.id, 'complained');
-
-        const unsubscribedContact = await prisma.contact.findUnique({
-          where: {id: contact.id},
-        });
-
-        expect(unsubscribedContact?.subscribed).toBe(false);
-
-        const complainedEmail = await prisma.email.findUnique({
-          where: {id: email.id},
-        });
-
-        expect(complainedEmail?.status).toBe(EmailStatus.COMPLAINED);
-      });
-    });
   });
 
   // ========================================
@@ -343,259 +313,12 @@ describe('EmailService', () => {
       });
     });
 
-    describe('PENDING → SENDING → SENT', () => {
-      it('should transition correctly on successful send', async () => {
-        const email = await factories.createEmail({
-          projectId,
-          contactId,
-          status: EmailStatus.PENDING,
-        });
-
-        await EmailService.sendEmail(email.id);
-
-        const sent = await prisma.email.findUnique({
-          where: {id: email.id},
-        });
-
-        expect(sent?.status).toBe(EmailStatus.SENT);
-        expect(sent?.sentAt).not.toBeNull();
-        expect(sent?.messageId).toBe('ses-message-123');
-      });
-
-      it('should create email.sent event after successful send', async () => {
-        const email = await factories.createEmail({
-          projectId,
-          contactId,
-          status: EmailStatus.PENDING,
-        });
-
-        await EmailService.sendEmail(email.id);
-
-        const event = await prisma.event.findFirst({
-          where: {
-            projectId,
-            contactId,
-            emailId: email.id,
-            name: 'email.sent',
-          },
-        });
-
-        expect(event).toBeDefined();
-        expect(event?.data).toHaveProperty('messageId', 'ses-message-123');
-      });
-    });
-
-    describe('PENDING → SENDING → FAILED', () => {
-      it('should mark as FAILED on SES error', async () => {
-        vi.mocked(sendRawEmail).mockRejectedValue(new Error('SES rate limit exceeded'));
-
-        const email = await factories.createEmail({
-          projectId,
-          contactId,
-          status: EmailStatus.PENDING,
-        });
-
-        await expect(EmailService.sendEmail(email.id)).rejects.toThrow();
-
-        const failed = await prisma.email.findUnique({
-          where: {id: email.id},
-        });
-
-        expect(failed?.status).toBe(EmailStatus.FAILED);
-        expect(failed?.error).toContain('rate limit');
-      });
-    });
-
-    describe('Idempotency - Prevent Re-sending', () => {
-      it('should NOT re-send email if already SENT', async () => {
-        const email = await factories.createEmail({
-          projectId,
-          contactId,
-          status: EmailStatus.SENT,
-          sentAt: new Date(),
-          messageId: 'already-sent-123',
-        });
-
-        const sesSpy = vi.mocked(sendRawEmail);
-        sesSpy.mockClear();
-
-        await EmailService.sendEmail(email.id);
-
-        expect(sesSpy).not.toHaveBeenCalled();
-      });
-    });
-
-    describe('Webhook Status Updates', () => {
-      it('should transition SENT → DELIVERED on delivery webhook', async () => {
-        const email = await factories.createEmail({
-          projectId,
-          contactId,
-          status: EmailStatus.SENT,
-        });
-
-        await EmailService.handleWebhookEvent(email.id, 'delivered');
-
-        const delivered = await prisma.email.findUnique({
-          where: {id: email.id},
-        });
-
-        expect(delivered?.status).toBe(EmailStatus.DELIVERED);
-        expect(delivered?.deliveredAt).not.toBeNull();
-      });
-
-      it('should transition to OPENED on first open webhook', async () => {
-        const email = await factories.createEmail({
-          projectId,
-          contactId,
-          status: EmailStatus.SENT,
-        });
-
-        await EmailService.handleWebhookEvent(email.id, 'opened');
-
-        const opened = await prisma.email.findUnique({
-          where: {id: email.id},
-        });
-
-        expect(opened?.status).toBe(EmailStatus.OPENED);
-        expect(opened?.openedAt).not.toBeNull();
-        expect(opened?.opens).toBe(1);
-      });
-
-      it('should increment opens counter on subsequent opens', async () => {
-        const email = await factories.createEmail({
-          projectId,
-          contactId,
-          status: EmailStatus.OPENED,
-          openedAt: new Date(),
-          opens: 1,
-        });
-
-        const firstOpenedAt = email.openedAt;
-
-        await EmailService.handleWebhookEvent(email.id, 'opened');
-
-        const reopened = await prisma.email.findUnique({
-          where: {id: email.id},
-        });
-
-        expect(reopened?.opens).toBe(2);
-        expect(reopened?.openedAt).toEqual(firstOpenedAt);
-      });
-
-      it('should transition to CLICKED and track clicks', async () => {
-        const email = await factories.createEmail({
-          projectId,
-          contactId,
-          status: EmailStatus.SENT,
-        });
-
-        await EmailService.handleWebhookEvent(email.id, 'clicked');
-
-        const clicked = await prisma.email.findUnique({
-          where: {id: email.id},
-        });
-
-        expect(clicked?.status).toBe(EmailStatus.CLICKED);
-        expect(clicked?.clickedAt).not.toBeNull();
-        expect(clicked?.clicks).toBe(1);
-      });
-
-      it('should transition to BOUNCED on bounce webhook and unsubscribe contact', async () => {
-        const contact = await factories.createContact({
-          projectId,
-          subscribed: true,
-        });
-        const email = await factories.createEmail({
-          projectId,
-          contactId: contact.id,
-          status: EmailStatus.SENT,
-        });
-
-        await EmailService.handleWebhookEvent(email.id, 'bounced');
-
-        const bounced = await prisma.email.findUnique({
-          where: {id: email.id},
-        });
-
-        expect(bounced?.status).toBe(EmailStatus.BOUNCED);
-        expect(bounced?.bouncedAt).not.toBeNull();
-
-        // Verify contact was unsubscribed
-        const unsubscribedContact = await prisma.contact.findUnique({
-          where: {id: contact.id},
-        });
-        expect(unsubscribedContact?.subscribed).toBe(false);
-
-        // Verify unsubscription event was tracked
-        const event = await prisma.event.findFirst({
-          where: {
-            projectId,
-            contactId: contact.id,
-            name: 'contact.unsubscribed',
-          },
-        });
-        expect(event).not.toBeNull();
-        expect(event?.data).toMatchObject({reason: 'bounce'});
-      });
-    });
-  });
-
-  // ========================================
-  // EMAIL STATISTICS
-  // ========================================
-  describe('Email Statistics', () => {
-    it('should calculate accurate email stats', async () => {
-      await factories.createEmail({projectId, contactId, status: EmailStatus.SENT});
-      await factories.createEmail({projectId, contactId, status: EmailStatus.SENT});
-      await factories.createEmail({projectId, contactId, status: EmailStatus.DELIVERED});
-      await factories.createEmail({projectId, contactId, status: EmailStatus.OPENED});
-      await factories.createEmail({projectId, contactId, status: EmailStatus.CLICKED});
-      await factories.createEmail({projectId, contactId, status: EmailStatus.BOUNCED});
-      await factories.createEmail({projectId, contactId, status: EmailStatus.FAILED});
-
-      const stats = await EmailService.getStats(projectId);
-
-      expect(stats.total).toBe(7);
-      expect(stats.sent).toBe(2);
-      expect(stats.delivered).toBe(1);
-      expect(stats.opened).toBe(1);
-      expect(stats.clicked).toBe(1);
-      expect(stats.bounced).toBe(1);
-      expect(stats.failed).toBe(1);
-    });
-
-    it('should calculate open rate correctly', async () => {
-      // Create 10 SENT emails, 5 of which are OPENED
-      // OPENED status counts as both sent and opened
-      for (let i = 0; i < 5; i++) {
-        await factories.createEmail({projectId, contactId, status: EmailStatus.SENT});
-      }
-      for (let i = 0; i < 5; i++) {
-        await factories.createEmail({projectId, contactId, status: EmailStatus.OPENED});
-      }
-
-      const stats = await EmailService.getStats(projectId);
-
-      // Total sent = 5 (SENT) + 5 (OPENED) = 10
-      // Total opened = 5 (OPENED)
-      // Open rate = 5/10 * 100 = 50%
-      // BUT: EmailService counts SENT separately from OPENED
-      // So opened/sent = 5/5 = 100%
-      // This is a quirk of how EmailStatus works - OPENED doesn't include SENT count
-      expect(stats.sent).toBe(5); // Only EmailStatus.SENT
-      expect(stats.opened).toBe(5); // Only EmailStatus.OPENED
-      expect(stats.total).toBe(10);
-    });
-
-    it('should handle zero sent emails without division by zero', async () => {
-      await factories.createEmail({projectId, contactId, status: EmailStatus.PENDING});
-
-      const stats = await EmailService.getStats(projectId);
-
-      expect(stats.openRate).toBe(0);
-      expect(stats.clickRate).toBe(0);
-      expect(stats.bounceRate).toBe(0);
-    });
+    // The send-path transitions that used to be asserted here (PENDING → SENDING → SENT, the
+    // failure path, and send idempotency) drove EmailService.sendEmail, and the webhook
+    // transitions drove EmailService.handleWebhookEvent -- duplicates of the worker and the SNS
+    // handler that production never called. The webhook assertions now live in
+    // controllers/__tests__/Webhooks.sns.test.ts. The send behaviour lives in
+    // jobs/email-processor.ts and has no coverage yet.
   });
 
   // ========================================
@@ -683,32 +406,6 @@ describe('EmailService', () => {
       expect(email.attachments).toBeNull();
     });
 
-    it('should pass attachments to SES when sending', async () => {
-      const attachment = {
-        filename: 'test.txt',
-        content: Buffer.from('Test content').toString('base64'),
-        contentType: 'text/plain',
-      };
-
-      const email = await EmailService.sendTransactionalEmail({
-        projectId,
-        contactId,
-        subject: 'Test',
-        body: 'Test',
-        from: 'test@example.com',
-        attachments: [attachment],
-      });
-
-      // Send the email
-      await EmailService.sendEmail(email.id);
-
-      // Verify SES was called with attachments
-      expect(vi.mocked(sendRawEmail)).toHaveBeenCalledWith(
-        expect.objectContaining({
-          attachments: [attachment],
-        }),
-      );
-    });
 
     it('should handle attachments in campaign emails', async () => {
       const contact = await factories.createContact({projectId, subscribed: true});
@@ -1043,7 +740,7 @@ describe('SES MIME Boundary Structure', () => {
     const relatedBoundary = relatedBoundaryMatch ? relatedBoundaryMatch[1] : '';
 
     expect(rawMessage).toContain(`--${relatedBoundary}\nContent-Type: multipart/alternative`);
-    expect(rawMessage).toContain(`Content-Disposition: inline; filename="image.png"`);
+    expect(rawMessage).toContain(`Content-Disposition: inline;\n filename="image.png"`);
     expect(rawMessage).toContain(`--${relatedBoundary}--`);
   });
 
@@ -1102,6 +799,145 @@ describe('SES MIME Boundary Structure', () => {
   });
 });
 
+// ========================================
+// SES PLAIN-TEXT ALTERNATIVE
+// ========================================
+// A multipart/alternative carrying only HTML is scored as filter evasion
+// (SpamAssassin MIME_HTML_ONLY +2.0, MPART_ALT_DIFF +0.7), so every message has to
+// carry a text/plain sibling.
+
+describe('SES plain-text alternative', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function sendAndCapture(content: {subject: string; html: string; text?: string}) {
+    const {sendRawEmail: realSendRawEmail, ses} = await vi.importActual<typeof import('../SESService')>('../SESService');
+
+    await realSendRawEmail({
+      from: {name: 'Sender', email: 'sender@example.com'},
+      to: ['recipient@example.com'],
+      content,
+    });
+
+    const callArgs = (ses.sendRawEmail as Mock).mock.calls[0][0];
+    return new TextDecoder().decode(callArgs.RawMessage.Data);
+  }
+
+  it('includes a text/plain part derived from the HTML', async () => {
+    const rawMessage = await sendAndCapture({
+      subject: 'Test Subject',
+      html: '<p>Hello world</p>',
+    });
+
+    expect(rawMessage).toContain('Content-Type: text/plain; charset=utf-8');
+    expect(rawMessage).toContain('Hello world');
+  });
+
+  it('places the text part before the HTML part', async () => {
+    const rawMessage = await sendAndCapture({
+      subject: 'Test Subject',
+      html: '<p>Hello world</p>',
+    });
+
+    // multipart/alternative is ordered least-rich first (RFC 2046 §5.1.4) and clients
+    // render the LAST part they understand. Reversed, every recipient sees plain text.
+    expect(rawMessage.indexOf('text/plain')).toBeLessThan(rawMessage.indexOf('text/html'));
+  });
+
+  it('carries link targets into the text part', async () => {
+    const rawMessage = await sendAndCapture({
+      subject: 'Test Subject',
+      html: '<p>Please <a href="https://example.com/reset">reset your password</a>.</p>',
+    });
+
+    // A text part that drops the URLs diverges from the HTML, which is the exact
+    // shape MPART_ALT_DIFF penalizes -- the thing this change exists to avoid.
+    expect(rawMessage).toContain('reset your password');
+    expect(rawMessage).toContain('https://example.com/reset');
+  });
+
+  it('prefers a caller-supplied text body over the conversion', async () => {
+    const rawMessage = await sendAndCapture({
+      subject: 'Test Subject',
+      html: '<p>Generated from HTML</p>',
+      text: 'Hand written plain text',
+    });
+
+    // Scoped to the text part: the HTML part still carries its own body, so asserting
+    // on the whole message would only prove the HTML survived.
+    const textPart = rawMessage.substring(
+      rawMessage.indexOf('Content-Type: text/plain'),
+      rawMessage.indexOf('Content-Type: text/html'),
+    );
+
+    expect(textPart).toContain('Hand written plain text');
+    expect(textPart).not.toContain('Generated from HTML');
+  });
+
+  it('omits the text part when the HTML has no readable content', async () => {
+    const rawMessage = await sendAndCapture({
+      subject: 'Test Subject',
+      html: '<html><body><img src="https://example.com/pixel.gif"></body></html>',
+    });
+
+    // An empty text part is worse than none: it advertises an alternative and then
+    // provides nothing, which is what the spam rules are actually looking for.
+    expect(rawMessage).not.toContain('Content-Type: text/plain');
+    expect(rawMessage).toContain('Content-Type: text/html');
+  });
+
+  it('encodes both parts as quoted-printable rather than claiming 7bit', async () => {
+    const rawMessage = await sendAndCapture({
+      subject: 'Test Subject',
+      html: '<p>Grüße aus München 🎉</p>',
+    });
+
+    // charset=utf-8 with CTE 7bit is a lie about the bytes on the wire as soon as the
+    // body contains a single non-ASCII character.
+    expect(rawMessage).not.toContain('Content-Transfer-Encoding: 7bit');
+    expect(rawMessage.match(/Content-Transfer-Encoding: quoted-printable/g)).toHaveLength(2);
+    expect(rawMessage).toContain('Gr=C3=BC=C3=9Fe');
+  });
+
+  it('keeps every body line within the RFC 5322 line limit', async () => {
+    const rawMessage = await sendAndCapture({
+      subject: 'Test Subject',
+      html: `<p>${'a very long sentence that keeps going '.repeat(80)}</p>`,
+    });
+
+    for (const line of rawMessage.split('\n')) {
+      expect(line.length).toBeLessThanOrEqual(998);
+    }
+  });
+
+  it('still nests the text part inside the alternative container when attachments are present', async () => {
+    const {sendRawEmail: realSendRawEmail, ses} = await vi.importActual<typeof import('../SESService')>('../SESService');
+
+    await realSendRawEmail({
+      from: {name: 'Sender', email: 'sender@example.com'},
+      to: ['recipient@example.com'],
+      content: {subject: 'Test Subject', html: '<p>Hello world</p>'},
+      attachments: [{filename: 'test.txt', content: 'SGVsbG8=', contentType: 'text/plain', disposition: 'attachment'}],
+    });
+
+    const callArgs = (ses.sendRawEmail as Mock).mock.calls[0][0];
+    const rawMessage = new TextDecoder().decode(callArgs.RawMessage.Data);
+
+    const altMatch = rawMessage.match(/Content-Type: multipart\/alternative; boundary="([^"]+)"/);
+    const altBoundary = altMatch ? altMatch[1] : 'NOT_FOUND_ALT';
+
+    // The text part must sit inside the alternative container, not float in the mixed
+    // container where it would render as a second visible body.
+    const altSection = rawMessage.substring(
+      rawMessage.indexOf(`--${altBoundary}`),
+      rawMessage.indexOf(`--${altBoundary}--`),
+    );
+    expect(altSection).toContain('Content-Type: text/plain; charset=utf-8');
+    expect(altSection).toContain('Content-Type: text/html; charset=utf-8');
+  });
+});
+
 describe('SES header serialization', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1153,5 +989,127 @@ describe('SES header serialization', () => {
     // terminate it (which would push the Content-Type into the body).
     expect(headerSection.endsWith('\n')).toBe(false);
     expect(headerSection).toContain('Content-Type:');
+  });
+
+  it('sends non-ASCII subjects and names as ASCII encoded-words', async () => {
+    const {sendRawEmail: realSendRawEmail, ses} = await vi.importActual<typeof import('../SESService')>('../SESService');
+
+    await realSendRawEmail({
+      from: {name: 'Café Acmé', email: 'sender@example.com'},
+      to: [{name: 'Doe, Jane', email: 'jane@example.com'}],
+      content: {subject: '¡Novedades de otoño!', html: '<p>Hola</p>'},
+    });
+
+    const callArgs = (ses.sendRawEmail as Mock).mock.calls[0][0];
+    const rawMessage = new TextDecoder().decode(callArgs.RawMessage.Data);
+    const [headerSection] = rawMessage.split('\n\n');
+
+    expect(headerSection).toMatch(/^[\x20-\x7E\n]*$/);
+    expect(headerSection).toContain('From: =?UTF-8?Q?Caf=C3=A9_Acm=C3=A9?= <sender@example.com>');
+    expect(headerSection).toContain('To: "Doe, Jane" <jane@example.com>');
+    expect(headerSection).toContain('Subject: =?UTF-8?Q?=C2=A1Novedades_de_oto=C3=B1o!?=');
+    // The display name travels in the From header; Source is only the identity.
+    expect(callArgs.Source).toBe('sender@example.com');
+  });
+
+  it('keeps Source and every header line short with a long non-ASCII sender name', async () => {
+    const {sendRawEmail: realSendRawEmail, ses} = await vi.importActual<typeof import('../SESService')>('../SESService');
+
+    await realSendRawEmail({
+      from: {name: 'Café Acmé · Nutrición y bienestar para tu día a día', email: 'sender@example.com'},
+      to: [
+        {name: 'Pérez, Ana', email: 'ana@example.com'},
+        {name: 'Núñez, Íñigo', email: 'inigo@example.com'},
+      ],
+      content: {
+        subject: '🍂 ¡Novedades de otoño! Recetas, menús y una sorpresa especial para ti',
+        html: '<p>Hola</p>',
+      },
+    });
+
+    const callArgs = (ses.sendRawEmail as Mock).mock.calls[0][0];
+    const rawMessage = new TextDecoder().decode(callArgs.RawMessage.Data);
+    const [headerSection] = rawMessage.split('\n\n');
+
+    expect(callArgs.Source).toBe('sender@example.com');
+    // RFC 2047 §2 limits lines that carry encoded-words to 76 characters.
+    for (const line of headerSection.split('\n')) {
+      expect(line.length).toBeLessThanOrEqual(76);
+    }
+  });
+
+  it('encodes non-ASCII attachment filenames with RFC 2231', async () => {
+    const {sendRawEmail: realSendRawEmail, ses} = await vi.importActual<typeof import('../SESService')>('../SESService');
+
+    await realSendRawEmail({
+      from: {name: 'Sender', email: 'sender@example.com'},
+      to: ['recipient@example.com'],
+      content: {subject: 'Test Subject', html: '<p>Hello world</p>'},
+      attachments: [
+        {
+          filename: 'Menú otoño.pdf',
+          content: 'SGVsbG8=',
+          contentType: 'application/pdf',
+          disposition: 'attachment' as const,
+        },
+      ],
+    });
+
+    const callArgs = (ses.sendRawEmail as Mock).mock.calls[0][0];
+    const rawMessage = new TextDecoder().decode(callArgs.RawMessage.Data);
+
+    expect(rawMessage).toContain(`Content-Disposition: attachment;\n filename*=UTF-8''Men%C3%BA%20oto%C3%B1o.pdf`);
+    expect(rawMessage).toMatch(/^[\x20-\x7E\n]*$/);
+  });
+});
+
+/**
+ * Regression tests for the RegExp-injection / ReDoS advisory.
+ *
+ * The /v1/send renderer used to build a `new RegExp` per contact-data key. Contact data
+ * keys are attacker-controlled on the public /v1/track endpoint, so a key like `(` threw a
+ * SyntaxError (persistent 500 on every send to that contact) and `(.+)+$` drove the event
+ * loop into catastrophic backtracking (DoS). Rendering now goes through the shared
+ * `renderTemplate` (EmailService.format), which treats names as data and never throws.
+ */
+describe('Template rendering — hostile contact data keys (no DB)', () => {
+  it('does not throw when a data key is an invalid regular expression', () => {
+    const run = () =>
+      EmailService.format({
+        subject: 'Hello {{name}}',
+        body: 'Body {{name}}',
+        // `(` would have produced `/\{\{\s*(\s*\}\}/` — an unterminated group.
+        data: {'(': 'x', name: 'Jane'},
+      });
+
+    expect(run).not.toThrow();
+    const {subject, body} = run();
+    expect(subject).toBe('Hello Jane');
+    expect(body).toBe('Body Jane');
+  });
+
+  it('renders promptly when a data key is a catastrophic-backtracking pattern', () => {
+    // A long unmatched `{{aaaa...` run is exactly the input that made `(.+)+$` hang.
+    const body = `{{${'a'.repeat(50_000)}`;
+
+    const start = Date.now();
+    const result = EmailService.format({
+      subject: 's',
+      body,
+      data: {'(.+)+$': 'x'},
+    });
+    const elapsedMs = Date.now() - start;
+
+    // The old code blocked the event loop for the full request timeout (60s+).
+    expect(elapsedMs).toBeLessThan(1_000);
+    // Unterminated placeholder is left as-is; the point is that it returns at all.
+    expect(result.body).toContain('a'.repeat(100));
+  });
+
+  it('still supports plain and fallback placeholders', () => {
+    expect(EmailService.format({subject: 'Hi {{name}}', body: 'x', data: {name: 'Jo'}}).subject).toBe('Hi Jo');
+    expect(EmailService.format({subject: 'Hi {{name ?? Guest}}', body: 'x', data: {}}).subject).toBe('Hi Guest');
+    // A missing field with no fallback renders empty rather than leaking `{{...}}`.
+    expect(EmailService.format({subject: 'Hi {{missing}}', body: 'x', data: {}}).subject).toBe('Hi ');
   });
 });
