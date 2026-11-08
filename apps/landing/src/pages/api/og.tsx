@@ -1,7 +1,7 @@
 import {ImageResponse} from 'next/og';
 import type {NextRequest} from 'next/server';
 
-import {getBricolageFont} from '../../lib/og-font';
+import {getDisplayFont} from '../../lib/og-font';
 
 export const config = {runtime: 'edge'};
 
@@ -14,7 +14,7 @@ export default function handler(req: NextRequest) {
   const description = searchParams.get('description') || '';
   const tag = searchParams.get('tag') || '';
 
-  const fontData = getBricolageFont();
+  const fontData = getDisplayFont();
 
   const titleLength = title.length;
   const fontSize = titleLength < 35 ? 144 : titleLength < 55 ? 120 : titleLength < 75 ? 100 : 84;
@@ -30,7 +30,7 @@ export default function handler(req: NextRequest) {
           justifyContent: 'space-between',
           padding: '128px 144px',
           backgroundColor: '#ffffff',
-          fontFamily: '"Bricolage Grotesque"',
+          fontFamily: '"Funnel Display"',
           position: 'relative',
           overflow: 'hidden',
         }}
@@ -75,21 +75,24 @@ export default function handler(req: NextRequest) {
         {/* Main content */}
         <div style={{display: 'flex', flexDirection: 'column', gap: '36px', maxWidth: '1840px'}}>
           {tag ? (
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                padding: '12px 28px',
-                backgroundColor: '#f4f4f5',
-                borderRadius: '12px',
-                fontSize: '30px',
-                color: '#52525b',
-                fontWeight: 600,
-                width: 'fit-content',
-                letterSpacing: '-0.01em',
-              }}
-            >
-              {tag}
+            /* Row wrapper keeps the chip at its intrinsic width — Satori ignores `fit-content`
+               and the column parent would otherwise stretch it to the full frame. */
+            <div style={{display: 'flex'}}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  padding: '12px 28px',
+                  backgroundColor: '#f4f4f5',
+                  borderRadius: '12px',
+                  fontSize: '30px',
+                  color: '#52525b',
+                  fontWeight: 600,
+                  letterSpacing: '-0.01em',
+                }}
+              >
+                {tag}
+              </div>
             </div>
           ) : null}
           <div
@@ -128,7 +131,7 @@ export default function handler(req: NextRequest) {
       height: 1260,
       fonts: [
         {
-          name: 'Bricolage Grotesque',
+          name: 'Funnel Display',
           data: fontData,
           style: 'normal',
           weight: 800,

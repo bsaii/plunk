@@ -18,7 +18,15 @@ import {factories, getPrismaClient} from '../../../../../test/helpers';
 // Mock QueueService to prevent actual job queueing
 vi.mock('../QueueService', () => ({
   QueueService: {
-    queueWorkflowStep: vi.fn(async () => ({id: 'mock-job-id'})),
+    // Emulates the worker draining the queue: steps are queued rather than run inline in
+    // production, so an immediate one is processed here and a delayed one stays queued.
+    queueWorkflowStep: vi.fn(async (executionId: string, stepId: string, delay?: number) => {
+      if (!delay) {
+        const {WorkflowExecutionService} = await import('../WorkflowExecutionService');
+        await WorkflowExecutionService.processStepExecution(executionId, stepId);
+      }
+      return {id: 'mock-job-id'};
+    }),
     queueEmail: vi.fn(async () => ({id: 'mock-email-job-id'})),
     queueWorkflowTimeout: vi.fn(async () => ({id: 'mock-timeout-job-id'})),
   },

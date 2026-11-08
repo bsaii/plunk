@@ -1,9 +1,9 @@
 /**
  * Maintenance Cloud Run Job entrypoint
  *
- * Dispatches to one of the 5 scheduled maintenance tasks based on a `--task=<name>`
+ * Dispatches to one of the scheduled maintenance tasks based on a `--task=<name>`
  * CLI argument (or a MAINTENANCE_TASK env var, for the Cloud Scheduler job-execution
- * override to set either way). One image serves all 5 Cloud Scheduler entries -
+ * override to set either way). One image serves every Cloud Scheduler entry -
  * see terraform/gcp/maintenance.tf for how each schedule supplies its own task.
  *
  * This is the GCP-deployment equivalent of the BullMQ repeatable jobs registered in
@@ -25,6 +25,10 @@ const TASKS = {
   'idempotency-key-cleanup': async () =>
     (await import('./idempotency-key-cleanup-processor.js')).runIdempotencyKeyCleanupJob(),
   'email-body-cleanup': async () => (await import('./email-body-cleanup-processor.js')).runEmailBodyCleanupJob(),
+  'snooze-sweep': async () => (await import('./snooze-sweep-processor.js')).runSnoozeSweepJob(),
+  'campaign-stats-sweep': async () => (await import('./campaign-stats-sweep-processor.js')).runCampaignStatsSweepJob(),
+  'scheduled-email-sweep': async () =>
+    (await import('./scheduled-email-sweep-processor.js')).runScheduledEmailSweepJob(),
 } as const satisfies Record<string, () => Promise<unknown>>;
 
 type TaskName = keyof typeof TASKS;

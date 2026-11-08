@@ -1,0 +1,196 @@
+---
+title: MCP Server
+description: Connect Plunk to Claude, Cursor, and other AI agents with the official Model Context Protocol server
+icon: Bot
+---
+
+The official Plunk [MCP](https://modelcontextprotocol.io) server lets an AI agent work in your Plunk
+project: sending transactional email, managing contacts and segments, drafting and sending
+campaigns, and building automation workflows. It works with both the hosted product and self-hosted
+instances.
+
+The package is published as [`@plunk/mcp`](https://www.npmjs.com/package/@plunk/mcp).
+
+## Setup
+
+You need a **secret key** (`sk_…`) from **Settings → API Keys**. See [API Keys](/docs/guides/api-keys)
+for how the two key types differ.
+
+import {Tab, Tabs} from 'fumadocs-ui/components/tabs';
+
+<Tabs items={['Claude Code', 'Claude Desktop / Cursor', 'Self-hosted']}>
+
+<Tab value="Claude Code">
+
+```bash
+claude mcp add plunk --env PLUNK_API_KEY=sk_your_key -- npx -y @plunk/mcp
+```
+
+</Tab>
+
+<Tab value="Claude Desktop / Cursor">
+
+```json
+{
+  "mcpServers": {
+    "plunk": {
+      "command": "npx",
+      "args": ["-y", "@plunk/mcp"],
+      "env": {
+        "PLUNK_API_KEY": "sk_your_key"
+      }
+    }
+  }
+}
+```
+
+</Tab>
+
+<Tab value="Self-hosted">
+
+Point `PLUNK_API_URL` at your own API domain:
+
+```json
+{
+  "mcpServers": {
+    "plunk": {
+      "command": "npx",
+      "args": ["-y", "@plunk/mcp"],
+      "env": {
+        "PLUNK_API_KEY": "sk_your_key",
+        "PLUNK_API_URL": "https://api.your-domain.com"
+      }
+    }
+  }
+}
+```
+
+</Tab>
+
+</Tabs>
+
+## Configuration
+
+| Variable                        | Required | Description                                                                                          |
+| ------------------------------- | -------- | ---------------------------------------------------------------------------------------------------- |
+| `PLUNK_API_KEY`                 | Yes      | Your project's secret key (`sk_…`).                                                                    |
+| `PLUNK_API_URL`                 | No       | API base URL. Defaults to the hosted API; set it when self-hosting.                                    |
+| `PLUNK_PUBLIC_KEY`              | No       | Public key (`pk_…`). Makes event tracking a single request instead of two.                             |
+| `PLUNK_READ_ONLY`               | No       | `true` registers only read-only tools.                                                                 |
+| `PLUNK_ALLOW_UNCONFIRMED_SENDS` | No       | `true` skips the confirmation prompt before sending. Headless automation only.                         |
+| `PLUNK_MCP_API_KEY`             | No       | Takes precedence over `PLUNK_API_KEY`, for environments where that name is already taken.               |
+| `PLUNK_MCP_API_URL`             | No       | Takes precedence over `PLUNK_API_URL`, for the same reason.                                             |
+| `PLUNK_API_KEY_<NAME>`          | No       | A named project's secret key. Set one per project to use several at once — see below.                   |
+| `PLUNK_PUBLIC_KEY_<NAME>`       | No       | That project's public key.                                                                              |
+
+<Callout type="warn">
+If you self-host, the Plunk API server itself uses a variable called `PLUNK_API_KEY` for its platform
+notification emails — and that key belongs to a different project. When both live in the same
+environment, set `PLUNK_MCP_API_KEY` so the agent works on the project you intend.
+</Callout>
+
+## Several projects
+
+To give one agent access to more than one project, set a key per project with the project's name as a
+suffix instead of `PLUNK_API_KEY`:
+
+```bash
+claude mcp add plunk \
+  --env PLUNK_API_KEY_ACME=sk_acme_key \
+  --env PLUNK_API_KEY_SIDE_PROJECT=sk_other_key \
+  -- npx -y @plunk/mcp
+```
+
+Every tool then takes a required `project` argument (`acme` or `side_project` here), so each call says
+which project it acts on — there is no "current project" the agent could lose track of. Confirmation
+prompts name the project too.
+
+- `PLUNK_PUBLIC_KEY_<NAME>` sets that project's public key, just like `PLUNK_PUBLIC_KEY` does for a single one.
+- Names may use letters, digits and underscores, and are lowercased.
+- Once a named key is set, a plain `PLUNK_API_KEY` is ignored, so a key inherited from a self-hosted Plunk
+  server's environment cannot slip in as an extra project. `PLUNK_MCP_API_KEY` and `PLUNK_PUBLIC_KEY` cannot be
+  combined with named keys.
+- All projects share one API URL and one read-only setting.
+
+## Available tools
+
+**Read-only** — the only tools registered when `PLUNK_READ_ONLY=true`:
+
+`plunk_list_contacts`, `plunk_get_contact`, `plunk_get_email`, `plunk_verify_email`, `plunk_list_templates`,
+`plunk_list_campaigns`, `plunk_get_campaign`, `plunk_get_campaign_stats`, `plunk_list_segments`,
+`plunk_list_domains`, `plunk_check_domain`, `plunk_list_workflows`, `plunk_get_workflow`,
+`plunk_check_workflow`, `plunk_list_workflow_fields`, `plunk_list_workflow_executions`,
+`plunk_get_workflow_execution`
+
+**Writing:**
+
+`plunk_create_contact`, `plunk_update_contact`, `plunk_subscribe_contact`,
+`plunk_unsubscribe_contact`, `plunk_delete_contact`, `plunk_send_email`, `plunk_reschedule_email`,
+`plunk_cancel_email`, `plunk_track_event`,
+`plunk_create_template`, `plunk_create_campaign`, `plunk_test_campaign`, `plunk_send_campaign`,
+`plunk_cancel_campaign`, `plunk_create_segment`, `plunk_create_workflow`, `plunk_update_workflow`,
+`plunk_duplicate_workflow`, `plunk_delete_workflow`, `plunk_add_workflow_step`, `plunk_add_workflow_steps`,
+`plunk_update_workflow_step`, `plunk_delete_workflow_step`, `plunk_connect_workflow_steps`,
+`plunk_disconnect_workflow_steps`, `plunk_set_workflow_enabled`, `plunk_start_workflow_execution`,
+`plunk_cancel_workflow_executions`
+
+## Safety
+
+A Plunk secret key grants full access to its project, so the server adds its own limits on top:
+
+- **Sends ask for confirmation.** Sending a campaign, or an email to more than one recipient, prompts
+  you first and tells you how many people will receive it. Enabling a workflow that sends email prompts
+  you too, as do changing the trigger of an enabled one and starting one for a contact. Confirmation is not something the model can supply itself — it comes from you, through your
+  MCP client. A client that cannot show a prompt cannot send.
+- **Read-only mode is structural.** With `PLUNK_READ_ONLY=true` the mutating tools are never
+  registered, so they cannot be invoked even by name.
+- **Account-level actions are out of reach.** Billing, project deletion, and key rotation all require
+  a dashboard session rather than an API key, so no tool can reach them.
+
+Use a separate project for anything you would rather an agent could not change, and rotate the key
+(**Settings → API Keys**) if you stop trusting a machine that held it. Note that rotation replaces both
+keys at once.
+
+## Things to know
+
+**Transactional versus campaign.** `plunk_send_email` is for one-off messages to specific people.
+Reaching a whole list means creating a campaign and then sending it. The agent is instructed not to
+loop sends over an audience, which would hit the [rate limit](/docs/api-reference/overview) and skip
+unsubscribe handling.
+
+**Scheduling and throttling.** `plunk_send_email` takes the same `delivery` option as the API: `at` to
+send later, `throttle` to send a notification at most once per period. Each recipient comes back with a
+status of `queued`, `scheduled` or `throttled`, so the agent can tell you what happened. A scheduled
+email can be moved with `plunk_reschedule_email` or cancelled with `plunk_cancel_email` until it goes
+out. See [Scheduling](/guides/scheduling) and [Throttling](/guides/throttling).
+
+**Verified domains.** Sender addresses must be on a domain verified for the project, or the send is
+rejected. `plunk_list_domains` lets the agent check before it sends, and `plunk_check_domain` re-runs
+the DNS check after you add records. Adding and removing domains stays in the dashboard — those
+endpoints skip the admin-role check for API keys, so exposing them would give an agent authority a
+non-admin member does not have. See [Verifying domains](/docs/guides/verifying-domains).
+
+**Unsubscribing someone.** `plunk_unsubscribe_contact` takes an email address directly, so "unsubscribe
+ada@example.com" is a single call. It matches exactly and case-insensitively rather than patching the
+first result of a substring search. `plunk_subscribe_contact` reverses it, but only for a contact that
+already exists — opting someone in never creates a new record.
+
+**Testing before a campaign goes out.** `plunk_test_campaign` sends one copy for review. The recipient
+must be a member of the Plunk project; any other address is rejected. If a send is already scheduled or
+in flight, `plunk_cancel_campaign` stops whatever has not gone out yet — it cannot recall what has.
+
+**Event tracking.** `/v1/track` requires the public key. Without `PLUNK_PUBLIC_KEY` the server gets
+the same result using the secret key, creating or updating the contact first and then recording the
+event. Either way the contact is created if it does not exist.
+
+**Workflows.** `plunk_create_workflow` creates a workflow that starts when a contact triggers the given
+event. It starts disabled, with only its trigger step. `plunk_add_workflow_steps` then adds the steps —
+any type the dashboard builder offers, including yes/no and multi-branch conditions — in one call, and
+`plunk_add_workflow_step`, `plunk_update_workflow_step`, `plunk_delete_workflow_step`,
+`plunk_connect_workflow_steps` and `plunk_disconnect_workflow_steps` edit the graph afterwards. Step
+settings are validated before they are saved, and `plunk_check_workflow` shows the flow as a numbered
+outline with anything that would fail at run time; enabling is refused while such errors remain.
+Deleting a step reconnects the flow around it; for a condition you choose whether the steps below it
+are kept or deleted too.
+`plunk_set_workflow_enabled` turns the workflow on or off. Disabling stops new contacts from entering;
+executions already in progress continue to the end.

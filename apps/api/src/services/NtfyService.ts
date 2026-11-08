@@ -182,6 +182,85 @@ export class NtfyService {
   }
 
   /**
+   * Notify that a card refused the off-session verification charge - URGENT
+   */
+  public static async notifyCardVerificationFailed(
+    projectName: string,
+    projectId: string,
+    declineCode: string,
+  ): Promise<void> {
+    await this.sendUrgent(
+      'Project Disabled - Card Verification Failed',
+      `Project "${projectName}" (${projectId}) was paused: the card refused an off-session charge (${declineCode}). Sending resumes if the customer adds a card that passes.`,
+      [NtfyTag.SHIELD, NtfyTag.MONEY, NtfyTag.ERROR],
+    );
+  }
+
+  /**
+   * Notify that card verification needs the customer - LOW priority.
+   *
+   * Not a fraud signal on its own: an SCA challenge or a soft decline on an otherwise good
+   * card. Sending is paused until the customer updates the card. Watch the volume here — if it
+   * stops being rare, a hosted re-authentication flow is worth building.
+   */
+  public static async notifyCardVerificationRequiresAction(
+    projectName: string,
+    projectId: string,
+    reason: string,
+  ): Promise<void> {
+    await this.send({
+      title: 'Card Verification Needs Attention',
+      message: `Project "${projectName}" (${projectId}) could not complete card verification: ${reason}. Sending paused until the customer updates the card.`,
+      priority: NtfyPriority.LOW,
+      tags: [NtfyTag.WARNING, NtfyTag.MONEY],
+    });
+  }
+
+  /**
+   * Notify that a project paused for its card passed verification on a new one - LOW priority.
+   */
+  public static async notifyCardVerificationRecovered(projectName: string, projectId: string): Promise<void> {
+    await this.send({
+      title: 'Card Verification Recovered',
+      message: `Project "${projectName}" (${projectId}) passed card verification on a new card. Sending resumed.`,
+      priority: NtfyPriority.LOW,
+      tags: [NtfyTag.MONEY],
+    });
+  }
+
+  /**
+   * Notify that a project never reached a verification verdict.
+   *
+   * Urgent past the escalation window, because by then the project has been sending for a day
+   * on a card nothing has confirmed — the exact state verification exists to prevent.
+   */
+  public static async notifyCardVerificationStalled(
+    projectName: string,
+    projectId: string,
+    status: string,
+    stalledForMinutes: number,
+    beyondEscalation: boolean,
+  ): Promise<void> {
+    const message = `Project "${projectName}" (${projectId}) has been ${status} for ${stalledForMinutes} minute(s) and is still able to send. Verify the card manually or disable the project.`;
+
+    if (beyondEscalation) {
+      await this.sendUrgent('Card Verification Stalled', message, [
+        NtfyTag.SHIELD,
+        NtfyTag.WARNING,
+        NtfyTag.ERROR,
+      ]);
+      return;
+    }
+
+    await this.send({
+      title: 'Card Verification Stalled',
+      message,
+      priority: NtfyPriority.DEFAULT,
+      tags: [NtfyTag.WARNING, NtfyTag.MONEY],
+    });
+  }
+
+  /**
    * Notify about successful invoice payment - MIN priority (routine)
    */
   public static async notifyInvoicePaid(projectName: string, projectId: string): Promise<void> {
@@ -327,6 +406,15 @@ export class NtfyService {
       priority: NtfyPriority.LOW,
       tags: [NtfyTag.ROCKET, NtfyTag.SUCCESS],
     });
+  }
+
+  /**
+   * Notify about a user deleting their own account - DEFAULT priority
+   */
+  public static async notifyUserDeleted(userEmail: string, userId: string): Promise<void> {
+    await this.sendDefault('Account Deleted', `User deleted their account: ${userEmail} (${userId})`, [
+      NtfyTag.WARNING,
+    ]);
   }
 
   /**

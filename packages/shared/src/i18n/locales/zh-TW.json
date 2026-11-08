@@ -2,26 +2,26 @@
   "pages": {
     "unsubscribe": {
       "title": "取消訂閱",
-      "description": "確定要取消 {email} 的郵件訂閱嗎？",
+      "description": "確定不再透過 {email} 接收 {projectName} 的郵件嗎？",
       "button": "取消訂閱",
       "buttonLoading": "處理中...",
       "managePreferences": "改為管理偏好設定",
       "successTitle": "已取消訂閱",
-      "successDescription": "{email} 已取消訂閱，你將不會再收到我們的郵件。",
+      "successDescription": "{email} 將不會再收到 {projectName} 的郵件。",
       "changedMind": "改變主意了嗎？",
       "subscribeAgain": "重新訂閱"
     },
     "subscribe": {
       "title": "訂閱最新消息",
-      "description": "要為 {email} 訂閱郵件嗎？",
+      "description": "要透過 {email} 接收 {projectName} 的郵件嗎？",
       "button": "訂閱",
       "buttonLoading": "處理中...",
       "successTitle": "訂閱成功！",
-      "successDescription": "{email} 已訂閱，你將會收到我們的最新消息。"
+      "successDescription": "{email} 現在會收到 {projectName} 的郵件。"
     },
     "manage": {
       "title": "管理偏好設定",
-      "description": "管理 {email} 的郵件偏好設定",
+      "description": "管理 {projectName} 寄送至 {email} 的郵件。",
       "subscriptionLabel": "郵件訂閱",
       "subscribedStatus": "目前已訂閱，會收到郵件通知",
       "unsubscribedStatus": "目前已取消訂閱",
@@ -31,9 +31,26 @@
       "subscribeToEmails": "訂閱郵件",
       "disclaimer": "你可以在此管理郵件偏好設定，訂閱狀態會即時更新。"
     },
+    "snooze": {
+      "cta": "改為暫停接收",
+      "prompt": "您希望暫停郵件多久？",
+      "duration_2_weeks": "2 週",
+      "duration_1_month": "1 個月",
+      "duration_6_months": "6 個月",
+      "duration_1_year": "1 年",
+      "buttonLoading": "正在暫停...",
+      "cancel": "取消",
+      "successTitle": "郵件已暫停",
+      "successDescription": "在 {date} 之前，{email} 不會收到 {projectName} 的郵件，之後會自動恢復。",
+      "status": "已暫停至 {date}",
+      "resume": "立即恢復"
+    },
     "common": {
       "loading": "載入中...",
-      "error": "發生錯誤"
+      "error": "發生錯誤",
+      "loadFailed": "無法載入郵件偏好設定。請檢查連結後再試一次。",
+      "actionFailed": "發生錯誤，請再試一次。",
+      "sentWith": "透過 {provider} 寄送"
     }
   },
   "email": {

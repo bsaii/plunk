@@ -2,26 +2,26 @@
   "pages": {
     "unsubscribe": {
       "title": "Cancelar suscripción",
-      "description": "Lamentamos que te vayas. ¿Estás seguro de que quieres cancelar la suscripción de {email} para dejar de recibir correos electrónicos?",
+      "description": "¿Quieres dejar de recibir correos electrónicos de {projectName} en {email}?",
       "button": "Cancelar suscripción",
       "buttonLoading": "Cancelando suscripción...",
       "managePreferences": "Gestionar preferencias en su lugar",
       "successTitle": "Suscripción cancelada",
-      "successDescription": "Se ha cancelado la suscripción de {email}. No recibirás más correos electrónicos de nuestra parte.",
+      "successDescription": "{email} ya no recibirá correos electrónicos de {projectName}.",
       "changedMind": "¿Has cambiado de opinión?",
       "subscribeAgain": "Suscribirse de nuevo"
     },
     "subscribe": {
       "title": "Suscribirse a las novedades",
-      "description": "¿Te gustaría suscribir {email} para recibir correos electrónicos?",
+      "description": "¿Quieres recibir correos electrónicos de {projectName} en {email}?",
       "button": "Suscribirse",
       "buttonLoading": "Suscribiendo...",
       "successTitle": "¡Suscripción completada!",
-      "successDescription": "{email} está ahora suscrito para recibir correos electrónicos de nuestra parte."
+      "successDescription": "{email} recibirá ahora correos electrónicos de {projectName}."
     },
     "manage": {
       "title": "Gestionar preferencias",
-      "description": "Gestiona las preferencias de correo electrónico de {email}",
+      "description": "Gestiona los correos electrónicos que {projectName} envía a {email}.",
       "subscriptionLabel": "Suscripción de correo electrónico",
       "subscribedStatus": "Actualmente estás suscrito para recibir correos electrónicos",
       "unsubscribedStatus": "Actualmente tienes cancelada la suscripción a los correos electrónicos",
@@ -31,9 +31,26 @@
       "subscribeToEmails": "Suscribirse a los correos electrónicos",
       "disclaimer": "Esta página te permite gestionar tus preferencias de correo electrónico. El estado de tu suscripción se actualiza en tiempo real."
     },
+    "snooze": {
+      "cta": "Pausar temporalmente",
+      "prompt": "¿Cuánto tiempo debemos pausar tus correos?",
+      "duration_2_weeks": "2 semanas",
+      "duration_1_month": "1 mes",
+      "duration_6_months": "6 meses",
+      "duration_1_year": "1 año",
+      "buttonLoading": "Pausando...",
+      "cancel": "Cancelar",
+      "successTitle": "Tus correos están en pausa",
+      "successDescription": "{email} no recibirá correos de {projectName} hasta el {date}. Se reanudarán automáticamente.",
+      "status": "En pausa hasta el {date}",
+      "resume": "Reanudar ahora"
+    },
     "common": {
       "loading": "Cargando...",
-      "error": "Error"
+      "error": "Error",
+      "loadFailed": "No pudimos cargar tus preferencias de correo. Revisa el enlace e inténtalo de nuevo.",
+      "actionFailed": "Algo salió mal. Inténtalo de nuevo.",
+      "sentWith": "Enviado con {provider}"
     }
   },
   "email": {

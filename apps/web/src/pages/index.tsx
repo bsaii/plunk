@@ -1,7 +1,4 @@
 import {
-  Alert,
-  AlertDescription,
-  AlertTitle,
   Button,
   Card,
   CardContent,
@@ -11,12 +8,13 @@ import {
   Skeleton,
 } from '@plunk/ui';
 import type {Activity, ActivityStats, CursorPaginatedResponse} from '@plunk/types';
-import {animate, AnimatePresence, motion, useMotionValue, useTransform} from 'framer-motion';
+import {AnimatePresence, motion} from 'framer-motion';
 import {
   AlertCircle,
   ArrowDownRight,
   ArrowUpRight,
   Calendar,
+  Clock,
   Eye,
   Inbox,
   Mail,
@@ -25,6 +23,8 @@ import {
   Send,
   ShieldCheck,
   TrendingUp,
+  UserMinus,
+  UserPlus,
   Users,
   Workflow,
   XCircle,
@@ -32,12 +32,13 @@ import {
 } from 'lucide-react';
 import {NextSeo} from 'next-seo';
 import Link from 'next/link';
-import {useEffect, useMemo, useState} from 'react';
+import {useEffect, useMemo} from 'react';
 import useSWR from 'swr';
+import {AnimatedNumber} from '../components/AnimatedNumber';
 import {ApiKeyDisplay} from '../components/ApiKeyDisplay';
 import {DashboardLayout} from '../components/DashboardLayout';
+import {HomeNotice} from '../components/HomeNotice';
 import {QuickStart} from '../components/QuickStart';
-import {SecurityWarningBanner} from '../components/SecurityWarningBanner';
 import {useActiveProject} from '../lib/contexts/ActiveProjectProvider';
 import {useDashboardStats} from '../lib/hooks/useDashboardStats';
 import {useOnboardingPath} from '../lib/hooks/useOnboardingPath';
@@ -46,7 +47,6 @@ import {useProjectSetupState} from '../lib/hooks/useProjectSetupState';
 import {useProjectSecurity} from '../lib/hooks/useProjectSecurity';
 import {useConfig} from '../lib/hooks/useConfig';
 import {useUser} from '../lib/hooks/useUser';
-import {network} from '../lib/network';
 
 function getGreeting(): string {
   const hour = new Date().getHours();
@@ -116,27 +116,24 @@ function TrendChip({trend, label}: {trend: TrendInfo; label?: string}) {
   );
 }
 
-function AnimatedNumber({value, format}: {value: number; format?: (n: number) => string}) {
-  const motionValue = useMotionValue(0);
-  const rounded = useTransform(motionValue, latest =>
-    format ? format(Math.round(latest)) : Math.round(latest).toLocaleString(),
-  );
-
-  useEffect(() => {
-    const controls = animate(motionValue, value, {
-      duration: 1.1,
-      ease: [0.22, 1, 0.36, 1],
-    });
-    return () => controls.stop();
-  }, [value, motionValue]);
-
-  return <motion.span>{rounded}</motion.span>;
-}
-
 interface ActivityVisual {
   icon: React.ComponentType<{className?: string}>;
   tone: 'neutral' | 'green' | 'blue' | 'amber' | 'red';
   label: string;
+}
+
+/**
+ * The snooze `reason` carried on a subscription event's data, if any.
+ * See ContactService.snooze for why snoozing reuses these two event names.
+ */
+function snoozeReason(a: Activity): 'snooze' | 'snooze_expired' | undefined {
+  const {eventData} = a.metadata;
+  const reason =
+    eventData && typeof eventData === 'object' && !Array.isArray(eventData)
+      ? (eventData as Record<string, unknown>).reason
+      : undefined;
+
+  return reason === 'snooze' || reason === 'snooze_expired' ? reason : undefined;
 }
 
 function activityVisual(a: Activity): ActivityVisual {
@@ -155,6 +152,17 @@ function activityVisual(a: Activity): ActivityVisual {
       return {icon: AlertCircle, tone: 'red', label: 'Complaint'};
     case 'event.triggered':
       return {icon: Zap, tone: 'amber', label: 'Event'};
+    // Snoozing rides on the two subscription events rather than adding its own, so the row's
+    // label comes from the event's `reason`. Without this a two-week pause would show up here
+    // as a lost subscriber.
+    case 'contact.subscribed':
+      return snoozeReason(a) === 'snooze_expired'
+        ? {icon: Clock, tone: 'green', label: 'Resumed'}
+        : {icon: UserPlus, tone: 'green', label: 'Subscribed'};
+    case 'contact.unsubscribed':
+      return snoozeReason(a) === 'snooze'
+        ? {icon: Clock, tone: 'neutral', label: 'Snoozed'}
+        : {icon: UserMinus, tone: 'neutral', label: 'Unsubscribed'};
     case 'campaign.sent':
       return {icon: Mail, tone: 'neutral', label: 'Campaign'};
     case 'campaign.scheduled':
@@ -178,6 +186,15 @@ const TONE_CLASSES: Record<ActivityVisual['tone'], {bg: string; fg: string}> = {
 
 function activityTitle(a: Activity): string {
   const m = a.metadata;
+  // Subscription events store a reserved name (`contact.unsubscribed`) that
+  // would read as raw plumbing. Title them by the email they came from, which
+  // is the fact this row adds; the state is already on the label beside it.
+  if (a.type === 'contact.subscribed' || a.type === 'contact.unsubscribed') {
+    if (typeof m.sourceSubject === 'string' && m.sourceSubject) return m.sourceSubject;
+    if (typeof m.campaignName === 'string' && m.campaignName) return m.campaignName;
+    if (typeof m.workflowName === 'string' && m.workflowName) return m.workflowName;
+    return activityVisual(a).label;
+  }
   if (typeof m.subject === 'string' && m.subject) return m.subject;
   if (typeof m.eventName === 'string' && m.eventName) return m.eventName;
   if (typeof m.campaignName === 'string' && m.campaignName) return m.campaignName;
@@ -247,8 +264,6 @@ export default function Index() {
   const onboardingStatus = useOnboardingStatus();
   const {path: onboardingPath} = useOnboardingPath(activeProject?.id);
   const bannerActive = onboardingStatus === 'show' && Boolean(onboardingPath);
-  const [isResending, setIsResending] = useState(false);
-  const [resendMessage, setResendMessage] = useState<string>('');
 
   // Previous-period stats (60d ago to 30d ago) for trend comparison.
   // Round to UTC day boundary so the URL — and therefore the Redis cache key —
@@ -297,18 +312,19 @@ export default function Index() {
 
   const greeting = useMemo(() => getGreeting(), []);
 
+  const projectName = activeProject?.name;
   const subtitle = useMemo(() => {
     if (isLoading) return 'Catching up on the last 30 days.';
     if (totalEmailsSent === 0) {
-      if (totalContacts === 0) return `${activeProject?.name ?? 'Your project'} is fresh. Time to send the first email.`;
+      if (totalContacts === 0) return `${projectName ?? 'Your project'} is fresh. Time to send the first email.`;
       return `${totalContacts.toLocaleString()} ${totalContacts === 1 ? 'contact' : 'contacts'} ready. Time to send something.`;
     }
-    const projectLabel = activeProject?.name ? `${activeProject.name} sent` : 'You sent';
+    const projectLabel = projectName ? `${projectName} sent` : 'You sent';
     const base = `${projectLabel} ${totalEmailsSent.toLocaleString()} ${totalEmailsSent === 1 ? 'email' : 'emails'} in the last 30 days.`;
     if (openRate >= 40) return `${base} Open rate is well above average.`;
     if (openRate >= 25) return `${base} Open rate is healthy.`;
     return base;
-  }, [isLoading, totalEmailsSent, totalContacts, openRate, activeProject?.name]);
+  }, [isLoading, totalEmailsSent, totalContacts, openRate, projectName]);
 
   // Friendly console message for the developer audience. Once per session.
   useEffect(() => {
@@ -329,19 +345,19 @@ export default function Index() {
 
   const stats = [
     {
-      name: 'Total Contacts',
+      name: 'Total contacts',
       value: totalContacts,
       icon: Users,
       format: (n: number) => n.toLocaleString(),
     },
     {
-      name: 'Emails Sent',
+      name: 'Emails sent',
       value: totalEmailsSent,
       icon: Mail,
       format: (n: number) => n.toLocaleString(),
     },
     {
-      name: 'Open Rate',
+      name: 'Open rate',
       value: openRate,
       icon: TrendingUp,
       format: (n: number) => `${n.toFixed(1)}%`,
@@ -373,24 +389,6 @@ export default function Index() {
   const healthText =
     !hasDelivData ? 'text-neutral-500' : worstLevel === 'healthy' ? 'text-emerald-700' : worstLevel === 'warning' ? 'text-amber-700' : 'text-red-700';
 
-  async function handleResendVerification() {
-    setIsResending(true);
-    setResendMessage('');
-    try {
-      const response = await network.fetch<{success: boolean}>('POST', '/auth/request-verification');
-
-      if (response.success) {
-        setResendMessage('Verification email sent! Please check your inbox.');
-      } else {
-        setResendMessage('Failed to send verification email. Please try again.');
-      }
-    } catch {
-      setResendMessage('Failed to send verification email. Please try again.');
-    } finally {
-      setIsResending(false);
-    }
-  }
-
   const recentItems = recentActivity?.data ?? [];
   const liveCount = recentCount?.count ?? 0;
 
@@ -399,79 +397,12 @@ export default function Index() {
       <NextSeo title="Dashboard" />
       <DashboardLayout>
         <div className="space-y-8">
-          {/* Project Disabled Banner */}
-          {activeProject && activeProject.disabled && (
-            <Alert variant="destructive">
-              <AlertCircle className="h-4 w-4" />
-              <AlertTitle>Project Disabled - Read-Only Mode</AlertTitle>
-              <AlertDescription className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
-                <div className="space-y-2 flex-1">
-                  <p className="text-sm font-medium">
-                    This project has been disabled and is now in read-only mode. You can view your data but cannot
-                    create, update, or delete anything.
-                  </p>
-                  <p className="text-xs text-red-800 mt-2">
-                    Please contact support for more details and to get your project re-enabled.
-                  </p>
-                </div>
-                <Button asChild size="sm" variant="outline" className="w-full sm:w-auto flex-shrink-0">
-                  <Link href="/settings?tab=security">View Details</Link>
-                </Button>
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {/* Email Verification Banner */}
-          {user && user.type === 'PASSWORD' && !user.emailVerified && (
-            <Alert variant="warning">
-              <AlertCircle className="h-4 w-4" />
-              <AlertTitle>Verify your email address</AlertTitle>
-              <AlertDescription className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                <span className="text-sm">
-                  Please verify your email address to unlock all features. Check your inbox for the verification link.
-                </span>
-                <div className="flex flex-col gap-2">
-                  <Button
-                    size="sm"
-                    className="w-full sm:w-auto"
-                    onClick={handleResendVerification}
-                    disabled={isResending}
-                  >
-                    {isResending ? 'Sending...' : 'Resend verification email'}
-                  </Button>
-                  {resendMessage && (
-                    <p className={`text-xs ${resendMessage.includes('sent') ? 'text-green-600' : 'text-red-500'}`}>
-                      {resendMessage}
-                    </p>
-                  )}
-                </div>
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {/* Security Warning Banner */}
-          {activeProject && !activeProject.disabled && securityMetrics && (
-            <SecurityWarningBanner status={securityMetrics.status} />
-          )}
-
-          {/* Subscription Warning Banner */}
-          {activeProject &&
-            !activeProject.disabled &&
-            !activeProject.subscription &&
-            config?.features.billing.enabled && (
-              <Alert variant="warning">
-                <AlertCircle className="h-4 w-4" />
-                <AlertTitle>Upgrade to remove Plunk branding</AlertTitle>
-                <AlertDescription className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                  <span className="text-sm">
-                    Your emails currently include Plunk branding. Upgrade to a subscription to remove it.
-                  </span>
-                  <Button asChild size="sm" className="w-full sm:w-auto">
-                    <Link href="/settings?tab=billing">Upgrade Now</Link>
-                  </Button>
-                </AlertDescription>
-              </Alert>
-            )}
+          <HomeNotice
+            project={activeProject}
+            securityMetrics={securityMetrics}
+            emailVerificationRequired={Boolean(user?.emailVerificationRequired)}
+            billingEnabled={Boolean(config?.features.billing.enabled)}
+          />
 
           {/* Header */}
           <motion.div
@@ -491,8 +422,8 @@ export default function Index() {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
             {stats.map((stat, index) => {
               const Icon = stat.icon;
-              const isEmails = stat.name === 'Emails Sent';
-              const isOpenRate = stat.name === 'Open Rate';
+              const isEmails = stat.name === 'Emails sent';
+              const isOpenRate = stat.name === 'Open rate';
               return (
                 <motion.div
                   key={stat.name}
@@ -647,19 +578,19 @@ export default function Index() {
           {/* API Keys — full-width slim band with the two keys side-by-side */}
           <Card>
             <CardHeader>
-              <CardTitle>API Keys</CardTitle>
+              <CardTitle>API keys</CardTitle>
               <CardDescription>Use these keys to integrate with Plunk</CardDescription>
             </CardHeader>
             <CardContent>
               {activeProject ? (
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2 md:gap-6">
                   <ApiKeyDisplay
-                    label="Public Key"
+                    label="Public key"
                     value={activeProject.public}
                     description="Use this key for client-side integrations"
                   />
                   <ApiKeyDisplay
-                    label="Secret Key"
+                    label="Secret key"
                     value={activeProject.secret}
                     description="Keep this key secure and never expose it publicly"
                     isSecret

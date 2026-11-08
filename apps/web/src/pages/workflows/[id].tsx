@@ -24,14 +24,21 @@ import {
   CommandItem,
   CommandList,
   IconSpinner,
-  Switch,
 } from '@plunk/ui';
 import type {Workflow, WorkflowExecution, WorkflowStep, WorkflowTransition} from '@plunk/db';
 import {DashboardLayout} from '../../components/DashboardLayout';
+import {
+  entryRuleError,
+  entryRuleOf,
+  entryRulePayload,
+  type EntryRulePayload,
+  WorkflowEntryRules,
+} from '../../components/WorkflowEntryRules';
 import {network} from '../../lib/network';
 import {
   AlertTriangle,
   ArrowLeft,
+  CircleStop,
   Info,
   Power,
   PowerOff,
@@ -113,11 +120,11 @@ export default function WorkflowEditorPage() {
     setDialog({type: 'cancelOne', executionId, cancelling: true});
     try {
       await network.fetch('DELETE', `/workflows/${id}/executions/${executionId}`);
-      toast.success('Execution cancelled successfully');
+      toast.success('Execution canceled');
       setDialog({type: 'none'});
       void mutate();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to cancel execution');
+      toast.error(error instanceof Error ? error.message : 'Couldn’t cancel the execution. Try again.');
       setDialog({type: 'cancelOne', executionId, cancelling: false});
     }
   };
@@ -127,11 +134,11 @@ export default function WorkflowEditorPage() {
     setDialog(d => (d.type === 'cancelAll' ? {...d, cancelling: true} : d));
     try {
       const result = await network.fetch<{cancelled: number}>('POST', `/workflows/${id}/executions/cancel-all`);
-      toast.success(`Successfully cancelled ${result.cancelled} execution(s)`);
+      toast.success(`Canceled ${result.cancelled} execution${result.cancelled === 1 ? '' : 's'}`);
       setDialog({type: 'none'});
       void mutate();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to cancel executions');
+      toast.error(error instanceof Error ? error.message : 'Couldn’t cancel those executions. Try again.');
       setDialog(d => (d.type === 'cancelAll' ? {...d, cancelling: false} : d));
     }
   };
@@ -304,36 +311,35 @@ export default function WorkflowEditorPage() {
       await network.fetch<Workflow, typeof WorkflowSchemas.update>('PATCH', `/workflows/${id}`, {
         enabled: !workflow.enabled,
       });
-      toast.success(`Workflow ${!workflow.enabled ? 'enabled' : 'disabled'} successfully`);
+      toast.success(`Workflow ${!workflow.enabled ? 'enabled' : 'disabled'}`);
       void mutate();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to toggle workflow');
+      toast.error(error instanceof Error ? error.message : 'Couldn’t change the workflow. Try again.');
     }
   };
 
   const handleUpdateSettings = async (data: {
     name: string;
     description?: string;
-    allowReentry?: boolean;
     triggerConfig?: {eventName: string};
-  }) => {
+  } & EntryRulePayload) => {
     try {
       await network.fetch<Workflow, typeof WorkflowSchemas.update>('PATCH', `/workflows/${id}`, data);
-      toast.success('Workflow updated successfully');
+      toast.success('Workflow updated');
       void mutate();
       setDialog({type: 'none'});
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to update workflow');
+      toast.error(error instanceof Error ? error.message : 'Couldn’t save the workflow. Try again.');
     }
   };
 
   const handleDelete = async () => {
     try {
       await network.fetch('DELETE', `/workflows/${id}`);
-      toast.success('Workflow deleted successfully');
+      toast.success('Workflow deleted');
       void router.push('/workflows');
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to delete workflow');
+      toast.error(error instanceof Error ? error.message : 'Couldn’t delete the workflow. Try again.');
     }
   };
 
@@ -445,19 +451,18 @@ export default function WorkflowEditorPage() {
             </AlertTitle>
             <AlertDescription>
               <p>
-                This workflow has <strong>{activeExecutionsCount}</strong> active execution
-                {activeExecutionsCount !== 1 ? 's' : ''}.{' '}
-                {!workflow.enabled && 'Even though the workflow is disabled, existing executions will continue. '}
-                To protect running workflows, you cannot:
+                <strong>{activeExecutionsCount}</strong> contact{activeExecutionsCount !== 1 ? 's are' : ' is'} part way
+                through this workflow
+                {!workflow.enabled && ', and disabling it does not stop them'}. Until they finish, you can&apos;t:
               </p>
               <ul className="list-disc list-inside space-y-1 mt-2">
                 <li>Delete steps or transitions</li>
-                <li>Modify step configurations (email templates, conditions, etc.)</li>
-                <li>Change the workflow trigger</li>
+                <li>Change step settings, such as templates or conditions</li>
+                <li>Change the trigger</li>
               </ul>
               <p className="mt-2">
-                You can still rename steps and adjust their position. To make configuration changes, wait for executions
-                to complete or cancel them from the Executions tab.
+                Renaming and repositioning steps still works. To change anything else, wait them out or cancel them from
+                the Executions tab.
               </p>
             </AlertDescription>
           </Alert>
@@ -512,7 +517,7 @@ export default function WorkflowEditorPage() {
                   : 'border-transparent text-neutral-500 hover:text-neutral-700 hover:border-neutral-300'
               }`}
             >
-              Workflow Builder
+              Workflow builder
             </button>
             <button
               onClick={() => setActiveTab('executions')}
@@ -531,7 +536,7 @@ export default function WorkflowEditorPage() {
         {activeTab === 'builder' ? (
           <Card>
             <CardHeader>
-              <CardTitle>Workflow Builder</CardTitle>
+              <CardTitle>Workflow builder</CardTitle>
               <CardDescription>
                 Click the <strong>+</strong> buttons to add and connect steps to your workflow.
               </CardDescription>
@@ -547,7 +552,7 @@ export default function WorkflowEditorPage() {
             <CardHeader>
               <div className="flex items-center justify-between">
                 <div>
-                  <CardTitle>Workflow Executions</CardTitle>
+                  <CardTitle>Workflow executions</CardTitle>
                   <CardDescription>View and manage all executions of this workflow</CardDescription>
                 </div>
                 {activeExecutionsCount > 0 && (
@@ -576,7 +581,7 @@ export default function WorkflowEditorPage() {
                           Status
                         </th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">
-                          Current Step
+                          Current step
                         </th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">
                           Started
@@ -671,29 +676,23 @@ export default function WorkflowEditorPage() {
                 return handleCancelExecution(dialog.executionId);
               }
             }}
-            title="Cancel Execution"
+            title="Cancel this execution?"
+            icon={CircleStop}
             description={
               dialog.type === 'cancelOne' && executionsData?.executions ? (
-                <div className="space-y-2">
-                  <p>
-                    Are you sure you want to cancel the workflow execution for{' '}
-                    <strong>
-                      {executionsData.executions.find(e => e.id === dialog.executionId)?.contact.email ||
-                        'this contact'}
-                    </strong>
-                    ?
-                  </p>
-                  <p className="text-sm text-neutral-600">
-                    The contact will not receive any remaining emails or actions from this workflow. This action cannot
-                    be undone.
-                  </p>
-                </div>
+                <>
+                  Stops this workflow for{' '}
+                  <strong>
+                    {executionsData.executions.find(e => e.id === dialog.executionId)?.contact.email || 'this contact'}
+                  </strong>
+                  . They won&apos;t receive any remaining emails or actions from it. This can&apos;t be undone.
+                </>
               ) : (
-                'Are you sure you want to cancel this execution?'
+                "The contact won't receive any remaining emails or actions from this workflow. This can't be undone."
               )
             }
-            confirmText="Cancel Execution"
-            cancelText="Keep Running"
+            confirmText="Cancel execution"
+            cancelText="Keep running"
             variant="destructive"
             status={dialog.type === 'cancelOne' && dialog.cancelling ? 'loading' : 'idle'}
           />
@@ -703,21 +702,17 @@ export default function WorkflowEditorPage() {
             open={dialog.type === 'cancelAll'}
             onOpenChange={open => !open && setDialog({type: 'none'})}
             onConfirm={handleCancelAllExecutions}
-            title="Cancel All Active Executions"
+            title="Cancel every active execution?"
+            icon={CircleStop}
             description={
-              <div className="space-y-2">
-                <p>
-                  Are you sure you want to cancel all <strong>{activeExecutionsCount}</strong> active execution
-                  {activeExecutionsCount !== 1 ? 's' : ''}?
-                </p>
-                <p className="text-sm text-neutral-600">
-                  All contacts currently in this workflow will be stopped and won&apos;t receive any remaining emails or
-                  actions. This action cannot be undone.
-                </p>
-              </div>
+              <>
+                Stops this workflow for all <strong>{activeExecutionsCount}</strong> contact
+                {activeExecutionsCount !== 1 ? 's' : ''} currently in it. They won&apos;t receive any remaining emails
+                or actions. This can&apos;t be undone.
+              </>
             }
-            confirmText={`Cancel ${activeExecutionsCount} Execution${activeExecutionsCount !== 1 ? 's' : ''}`}
-            cancelText="Keep Running"
+            confirmText={`Cancel ${activeExecutionsCount} execution${activeExecutionsCount !== 1 ? 's' : ''}`}
+            cancelText="Keep running"
             variant="destructive"
             status={dialog.type === 'cancelAll' && dialog.cancelling ? 'loading' : 'idle'}
           />
@@ -727,9 +722,9 @@ export default function WorkflowEditorPage() {
             open={dialog.type === 'delete'}
             onOpenChange={open => !open && setDialog({type: 'none'})}
             onConfirm={handleDelete}
-            title="Delete Workflow"
-            description="Are you sure you want to delete this workflow? This action cannot be undone."
-            confirmText="Delete Workflow"
+            title={`Delete ${workflow.name}?`}
+            description="Its steps and execution history are deleted too. This can't be undone."
+            confirmText="Delete workflow"
             variant="destructive"
           />
         </>
@@ -746,16 +741,15 @@ interface SettingsDialogProps {
   onSave: (data: {
     name: string;
     description?: string;
-    allowReentry?: boolean;
     triggerConfig?: {eventName: string};
-  }) => Promise<void>;
+  } & EntryRulePayload) => Promise<void>;
 }
 
 function SettingsDialog({workflow, open, onOpenChange, onSave}: SettingsDialogProps) {
   const triggerConfig = workflow.triggerConfig as {eventName?: string} | null;
   const [name, setName] = useState(workflow.name);
   const [description, setDescription] = useState(workflow.description ?? '');
-  const [allowReentry, setAllowReentry] = useState(workflow.allowReentry ?? false);
+  const [entryRule, setEntryRule] = useState(() => entryRuleOf(workflow));
   const [eventName, setEventName] = useState(triggerConfig?.eventName ?? '');
   const [eventPopoverOpen, setEventPopoverOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -765,7 +759,7 @@ function SettingsDialog({workflow, open, onOpenChange, onSave}: SettingsDialogPr
     if (open) {
       setName(workflow.name);
       setDescription(workflow.description ?? '');
-      setAllowReentry(workflow.allowReentry ?? false);
+      setEntryRule(entryRuleOf(workflow));
       const config = workflow.triggerConfig as {eventName?: string} | null;
       setEventName(config?.eventName ?? '');
     }
@@ -784,7 +778,7 @@ function SettingsDialog({workflow, open, onOpenChange, onSave}: SettingsDialogPr
       await onSave({
         name,
         description: description || undefined,
-        allowReentry,
+        ...entryRulePayload(entryRule),
         triggerConfig: eventName.trim() ? {eventName: eventName.trim()} : undefined,
       });
     } finally {
@@ -796,11 +790,13 @@ function SettingsDialog({workflow, open, onOpenChange, onSave}: SettingsDialogPr
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Workflow Settings</DialogTitle>
+          <DialogTitle>Workflow settings</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <Label htmlFor="name">Name *</Label>
+            <Label htmlFor="name">Name
+            <span className="text-red-500"> *</span>
+          </Label>
             <Input id="name" type="text" value={name} onChange={e => setName(e.target.value)} required />
           </div>
 
@@ -816,7 +812,9 @@ function SettingsDialog({workflow, open, onOpenChange, onSave}: SettingsDialogPr
           </div>
 
           <div>
-            <Label htmlFor="eventName">Trigger Event *</Label>
+            <Label htmlFor="eventName">Trigger event
+            <span className="text-red-500"> *</span>
+          </Label>
             <div className="relative">
               <Input
                 id="eventName"
@@ -830,7 +828,7 @@ function SettingsDialog({workflow, open, onOpenChange, onSave}: SettingsDialogPr
                 onBlur={() => {
                   setTimeout(() => setEventPopoverOpen(false), 150);
                 }}
-                placeholder="e.g., contact.created, email.opened"
+                placeholder="e.g., user.signup, email.open"
                 required
                 autoComplete="off"
               />
@@ -866,25 +864,14 @@ function SettingsDialog({workflow, open, onOpenChange, onSave}: SettingsDialogPr
             </p>
           </div>
 
-          <div className="flex items-start gap-3 p-4 bg-neutral-50 rounded-lg border border-neutral-200">
-            <Switch id="allowReentry" checked={allowReentry} onCheckedChange={setAllowReentry} />
-            <div className="flex-1">
-              <Label htmlFor="allowReentry" className="font-medium cursor-pointer">
-                Allow Re-entry
-              </Label>
-              <p className="text-xs text-neutral-500 mt-1">
-                When enabled, contacts can enter this workflow multiple times. When disabled, contacts can only enter
-                once, ever.
-              </p>
-            </div>
-          </div>
+          <WorkflowEntryRules value={entryRule} onChange={setEntryRule} eventName={eventName} />
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={isSubmitting}>
               Cancel
             </Button>
-            <Button type="submit" disabled={isSubmitting}>
-              {isSubmitting ? 'Saving...' : 'Save Changes'}
+            <Button type="submit" disabled={isSubmitting || entryRuleError(entryRule) !== null}>
+              {isSubmitting ? 'Saving…' : 'Save Changes'}
             </Button>
           </DialogFooter>
         </form>

@@ -2,26 +2,26 @@
   "pages": {
     "unsubscribe": {
       "title": "Unsubscribe",
-      "description": "We're sorry to see you go. Are you sure you want to unsubscribe {email} from receiving emails?",
+      "description": "Stop receiving emails from {projectName} at {email}?",
       "button": "Unsubscribe",
       "buttonLoading": "Unsubscribing...",
       "managePreferences": "Manage preferences instead",
       "successTitle": "You're unsubscribed",
-      "successDescription": "{email} has been unsubscribed. You won't receive any more emails from us.",
+      "successDescription": "{email} won't receive any more emails from {projectName}.",
       "changedMind": "Changed your mind?",
       "subscribeAgain": "Subscribe again"
     },
     "subscribe": {
       "title": "Subscribe to updates",
-      "description": "Would you like to subscribe {email} to receive emails?",
+      "description": "Receive emails from {projectName} at {email}?",
       "button": "Subscribe",
       "buttonLoading": "Subscribing...",
       "successTitle": "You're subscribed!",
-      "successDescription": "{email} is now subscribed to receive emails from us."
+      "successDescription": "{email} will now receive emails from {projectName}."
     },
     "manage": {
       "title": "Manage Preferences",
-      "description": "Manage email preferences for {email}",
+      "description": "Manage the emails {projectName} sends to {email}.",
       "subscriptionLabel": "Email Subscription",
       "subscribedStatus": "You are currently subscribed to receive emails",
       "unsubscribedStatus": "You are currently unsubscribed from emails",
@@ -31,9 +31,26 @@
       "subscribeToEmails": "Subscribe to emails",
       "disclaimer": "This page allows you to manage your email preferences. Your subscription status is updated in real-time."
     },
+    "snooze": {
+      "cta": "Snooze emails instead",
+      "prompt": "How long should we pause your emails?",
+      "duration_2_weeks": "2 weeks",
+      "duration_1_month": "1 month",
+      "duration_6_months": "6 months",
+      "duration_1_year": "1 year",
+      "buttonLoading": "Snoozing...",
+      "cancel": "Cancel",
+      "successTitle": "Your emails are snoozed",
+      "successDescription": "{email} won't receive emails from {projectName} until {date}. They resume automatically.",
+      "status": "Snoozed until {date}",
+      "resume": "Resume emails now"
+    },
     "common": {
       "loading": "Loading...",
-      "error": "Error"
+      "error": "Error",
+      "loadFailed": "We couldn't load your email preferences. Check the link and try again.",
+      "actionFailed": "Something went wrong. Please try again.",
+      "sentWith": "Sent with {provider}"
     }
   },
   "email": {

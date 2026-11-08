@@ -2,26 +2,26 @@
   "pages": {
     "unsubscribe": {
       "title": "配信停止",
-      "description": "メールの配信を停止されるとのこと、残念です。{email} へのメール配信を停止してもよろしいですか？",
+      "description": "{email} への {projectName} からのメール配信を停止しますか？",
       "button": "配信を停止する",
       "buttonLoading": "配信停止中...",
       "managePreferences": "代わりに配信設定を変更する",
       "successTitle": "配信を停止しました",
-      "successDescription": "{email} の配信を停止しました。今後、こちらからメールが届くことはありません。",
+      "successDescription": "{email} への {projectName} からのメール配信を停止しました。",
       "changedMind": "気が変わりましたか？",
       "subscribeAgain": "再び配信登録する"
     },
     "subscribe": {
       "title": "最新情報の配信登録する",
-      "description": "{email} でメールの配信を受け取りますか？",
+      "description": "{email} で {projectName} からのメールを受け取りますか？",
       "button": "登録する",
       "buttonLoading": "登録中...",
       "successTitle": "登録が完了しました！",
-      "successDescription": "{email} のメール配信登録が完了しました。"
+      "successDescription": "{email} で {projectName} からのメールを受け取るよう登録しました。"
     },
     "manage": {
       "title": "配信設定の管理",
-      "description": "{email} のメール配信設定を管理します",
+      "description": "{projectName} から {email} に届くメールの配信設定を管理します。",
       "subscriptionLabel": "メール配信",
       "subscribedStatus": "現在、メールを受信する設定になっています",
       "unsubscribedStatus": "現在、メールの配信を停止しています",
@@ -31,9 +31,26 @@
       "subscribeToEmails": "メール配信を受け取る",
       "disclaimer": "このページではメールの配信設定を管理できます。設定の変更はリアルタイムで反映されます。"
     },
+    "snooze": {
+      "cta": "代わりに一時停止する",
+      "prompt": "メールの配信をどのくらい停止しますか？",
+      "duration_2_weeks": "2週間",
+      "duration_1_month": "1か月",
+      "duration_6_months": "6か月",
+      "duration_1_year": "1年",
+      "buttonLoading": "停止しています...",
+      "cancel": "キャンセル",
+      "successTitle": "メールを一時停止しました",
+      "successDescription": "{date} まで、{email} に {projectName} からのメールは届きません。その後は自動的に再開します。",
+      "status": "{date} まで停止中",
+      "resume": "今すぐ再開する"
+    },
     "common": {
       "loading": "読み込み中...",
-      "error": "エラー"
+      "error": "エラー",
+      "loadFailed": "メール設定を読み込めませんでした。リンクを確認して、もう一度お試しください。",
+      "actionFailed": "問題が発生しました。もう一度お試しください。",
+      "sentWith": "{provider} で送信"
     }
   },
   "email": {

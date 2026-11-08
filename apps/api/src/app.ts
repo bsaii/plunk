@@ -9,7 +9,6 @@ import signale from 'signale';
 import {ZodError} from 'zod';
 
 import {
-  DASHBOARD_URI,
   GITHUB_OAUTH_ENABLED,
   GOOGLE_OAUTH_ENABLED,
   LANDING_URI,
@@ -17,12 +16,16 @@ import {
   PLUNK_ENABLED,
   PORT,
   QUEUE_BACKEND,
+  RATE_LIMIT_CONTACTS_PER_SECOND,
+  RATE_LIMIT_ENABLED,
+  RATE_LIMIT_SEND_PER_SECOND,
+  RATE_LIMIT_TRACK_PER_SECOND,
   S3_ENABLED,
   SMTP_ENABLED,
   STRIPE_ENABLED,
   TRACKING_TOGGLE_ENABLED,
-  WIKI_URI,
 } from './app/constants.js';
+import {ALLOWED_ORIGINS, isAllowedOrigin} from './app/origins.js';
 import {Actions} from './controllers/Actions.js';
 import {Activity} from './controllers/Activity.js';
 import {Analytics} from './controllers/Analytics.js';
@@ -30,6 +33,7 @@ import {Auth} from './controllers/Auth.js';
 import {Campaigns} from './controllers/Campaigns.js';
 import {Contacts} from './controllers/Contacts.js';
 import {Domains} from './controllers/Domains.js';
+import {Emails} from './controllers/Emails.js';
 import {Events} from './controllers/Events.js';
 import {Oauth} from './controllers/Oauth/index.js';
 import {Projects} from './controllers/Projects.js';
@@ -45,12 +49,17 @@ import {prisma} from './database/prisma.js';
 import {ErrorCode, type FieldError, HttpException, ValidationError} from './exceptions/index.js';
 import {
   apiRequestCleanupQueue,
+  campaignStatsSweepQueue,
   domainVerificationQueue,
+  cardVerificationSweepQueue,
   emailBodyCleanupQueue,
   idempotencyKeyCleanupQueue,
+  scheduledEmailSweepQueue,
   segmentCountQueue,
+  snoozeSweepQueue,
 } from './services/QueueService.js';
 import * as S3Service from './services/S3Service.js';
+import {verifyConfigurationSets} from './services/SESService.js';
 import {requestIdMiddleware} from './middleware/requestId.js';
 import {databaseRequestLogger} from './middleware/requestLogger.js';
 import {logger, requestLogger} from './utils/logger.js';
@@ -84,11 +93,7 @@ const server = new (class extends Server {
     // Log all requests to database for historical tracking and analytics
     this.app.use(databaseRequestLogger);
 
-    // Build allowed origins from environment variables
-    const allowedOrigins =
-      NODE_ENV === 'development'
-        ? [/.*\.localhost:1000/, 'http://localhost:3000', 'http://localhost:4000']
-        : [DASHBOARD_URI, LANDING_URI, WIKI_URI];
+    const allowedOrigins = ALLOWED_ORIGINS;
 
     // Public API endpoints that should allow all origins
     const publicApiPaths = ['/v1', '/v1/track', '/v1/send'];
@@ -127,15 +132,7 @@ const server = new (class extends Server {
             return callback(null, true);
           }
 
-          // Check if origin matches any allowed origin (string or regex)
-          const isAllowed = allowedOrigins.some(allowed => {
-            if (allowed instanceof RegExp) {
-              return allowed.test(origin);
-            }
-            return allowed === origin;
-          });
-
-          if (isAllowed) {
+          if (isAllowedOrigin(origin)) {
             callback(null, true);
           } else {
             // Log CORS rejection with helpful information
@@ -164,6 +161,7 @@ const server = new (class extends Server {
       new Users(),
       new Contacts(),
       new Domains(),
+      new Emails(),
       new Projects(),
       new Segments(),
       new Templates(),
@@ -448,6 +446,13 @@ void prisma.$connect().then(async () => {
       enabled: PLUNK_ENABLED,
       details: PLUNK_ENABLED ? 'Platform email notifications enabled' : 'PLUNK_API_KEY not configured',
     },
+    {
+      name: 'API rate limiting',
+      enabled: RATE_LIMIT_ENABLED,
+      details: RATE_LIMIT_ENABLED
+        ? `track ${RATE_LIMIT_TRACK_PER_SECOND}/s, send ${RATE_LIMIT_SEND_PER_SECOND}/s, contacts ${RATE_LIMIT_CONTACTS_PER_SECOND}/s`
+        : 'Disabled via RATE_LIMIT_ENABLED=false',
+    },
   ];
 
   const rows = features.map(f => ({
@@ -466,7 +471,10 @@ void prisma.$connect().then(async () => {
     }
   }
 
-  // The 5 maintenance sweeps below are BullMQ's in-process repeatable jobs — the
+  // Not awaited: a slow SES response must not hold up scheduling the background jobs below
+  void verifyConfigurationSets();
+
+  // The maintenance sweeps below are BullMQ's in-process repeatable jobs — the
   // self-hosted (all-BullMQ) path. Under QUEUE_BACKEND=cloud-tasks (GCP deployment),
   // these run instead as Cloud Scheduler + a Cloud Run Job (terraform/gcp/maintenance.tf),
   // so registering them here too would double-run every sweep.
@@ -545,5 +553,73 @@ void prisma.$connect().then(async () => {
     );
 
     signale.info('[BACKGROUND-JOB] Email body cleanup scheduled (BullMQ repeatable job, runs daily at 4 AM)');
+
+    // Set up repeatable job for card verification reconciliation (BullMQ)
+    // Every 15 minutes: a project stuck without a verification verdict is still able to send,
+    // so the window between the stall and someone noticing is the exposure being closed.
+    await cardVerificationSweepQueue.add(
+      'sweep-stalled-verifications',
+      {},
+      {
+        repeat: {
+          pattern: '*/15 * * * *', // Every 15 minutes
+        },
+        jobId: 'card-verification-sweep-repeatable', // Fixed ID to prevent duplicates
+      },
+    );
+
+    signale.info('[BACKGROUND-JOB] Card verification sweep scheduled (BullMQ repeatable job, runs every 15 minutes)');
+
+    // Set up repeatable job for campaign stats reconciliation (BullMQ)
+    // Every 2 minutes: opens and clicks arrive long after a campaign finalizes, and the counters
+    // the stats endpoint reads are only written by a reconcile. This is the lag between an event
+    // landing on the email row and the campaign reporting it.
+    await campaignStatsSweepQueue.add(
+      'sweep-dirty-campaign-stats',
+      {},
+      {
+        repeat: {
+          pattern: '*/2 * * * *', // Every 2 minutes
+        },
+        jobId: 'campaign-stats-sweep-repeatable', // Fixed ID to prevent duplicates
+      },
+    );
+
+    signale.info('[BACKGROUND-JOB] Campaign stats sweep scheduled (BullMQ repeatable job, runs every 2 minutes)');
+
+    // Set up repeatable job for the snooze sweep (BullMQ)
+    // Every 5 minutes: a snooze is stored as `subscribed = false` plus a date, which means it has
+    // no way to end on its own -- this sweep is what resubscribes the contact. Five minutes is far
+    // finer than a window measured in weeks to years, and a run with nothing due costs one indexed
+    // query returning no rows.
+    await snoozeSweepQueue.add(
+      'sweep-expired-snoozes',
+      {},
+      {
+        repeat: {
+          pattern: '*/5 * * * *', // Every 5 minutes
+        },
+        jobId: 'snooze-sweep-repeatable', // Fixed ID to prevent duplicates
+      },
+    );
+
+    signale.info('[BACKGROUND-JOB] Snooze sweep scheduled (BullMQ repeatable job, runs every 5 minutes)');
+
+    // Set up repeatable job for the scheduled email sweep (BullMQ)
+    // Every 5 minutes: a scheduled transactional email is sent by its own delayed job; this only
+    // catches the ones whose job was lost, which would otherwise never be sent. A run with
+    // nothing overdue is one query on a partial index of the emails still waiting.
+    await scheduledEmailSweepQueue.add(
+      'sweep-overdue-scheduled-emails',
+      {},
+      {
+        repeat: {
+          pattern: '*/5 * * * *', // Every 5 minutes
+        },
+        jobId: 'scheduled-email-sweep-repeatable', // Fixed ID to prevent duplicates
+      },
+    );
+
+    signale.info('[BACKGROUND-JOB] Scheduled email sweep scheduled (BullMQ repeatable job, runs every 5 minutes)');
   }
 });

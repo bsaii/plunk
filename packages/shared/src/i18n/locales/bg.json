@@ -2,26 +2,26 @@
   "pages": {
     "unsubscribe": {
       "title": "Отписване",
-      "description": "Съжаляваме, че си тръгвате. Сигурни ли сте, че искате да отпишете {email} от получаването на имейли?",
+      "description": "Искате ли да спрете да получавате имейли от {projectName} на {email}?",
       "button": "Отпиши",
       "buttonLoading": "Отписване...",
       "managePreferences": "Управлявай настройки",
       "successTitle": "Отписани сте",
-      "successDescription": "{email} е отписан. Няма да получавате повече имейли от нас.",
+      "successDescription": "{email} вече няма да получава имейли от {projectName}.",
       "changedMind": "Размислихте?",
       "subscribeAgain": "Абонирай се пак"
     },
     "subscribe": {
       "title": "Абонамент за новини",
-      "description": "Искате ли да абонирате {email} за имейли?",
+      "description": "Искате ли да получавате имейли от {projectName} на {email}?",
       "button": "Абонирай",
       "buttonLoading": "Абониране...",
       "successTitle": "Абонирани сте!",
-      "successDescription": "{email} вече е абониран за имейли от нас."
+      "successDescription": "{email} вече ще получава имейли от {projectName}."
     },
     "manage": {
       "title": "Настройки",
-      "description": "Настройки за {email}",
+      "description": "Управлявайте имейлите, които {projectName} изпраща до {email}.",
       "subscriptionLabel": "Абонамент",
       "subscribedStatus": "В момента сте абониран",
       "unsubscribedStatus": "В момента сте отписан",
@@ -31,9 +31,26 @@
       "subscribeToEmails": "Абонирай за имейли",
       "disclaimer": "Тук управлявате имейл настройките си. Статусът се обновява веднага."
     },
+    "snooze": {
+      "cta": "Вместо това спри временно",
+      "prompt": "За колко време да спрем имейлите?",
+      "duration_2_weeks": "2 седмици",
+      "duration_1_month": "1 месец",
+      "duration_6_months": "6 месеца",
+      "duration_1_year": "1 година",
+      "buttonLoading": "Спиране...",
+      "cancel": "Отказ",
+      "successTitle": "Имейлите са спрени временно",
+      "successDescription": "{email} няма да получава имейли от {projectName} до {date}. След това изпращането ще продължи автоматично.",
+      "status": "Спряно до {date}",
+      "resume": "Възобнови сега"
+    },
     "common": {
       "loading": "Зарежда...",
-      "error": "Грешка"
+      "error": "Грешка",
+      "loadFailed": "Не успяхме да заредим настройките ви за имейл. Проверете връзката и опитайте отново.",
+      "actionFailed": "Нещо се обърка. Опитайте отново.",
+      "sentWith": "Изпратено чрез {provider}"
     }
   },
   "email": {

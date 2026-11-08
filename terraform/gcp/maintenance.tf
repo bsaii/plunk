@@ -1,5 +1,6 @@
-# plunk-maintenance — the 5 scheduled maintenance sweeps (domain verification,
-# segment counts, and the 3 cleanup jobs) as a Cloud Run Job driven by Cloud
+# plunk-maintenance — the 8 scheduled maintenance sweeps (domain verification,
+# segment counts, the 3 cleanup jobs, and the snooze / campaign-stats /
+# scheduled-email sweeps) as a Cloud Run Job driven by Cloud
 # Scheduler, instead of BullMQ's in-process repeatable jobs (app.ts, guarded
 # behind QUEUE_BACKEND — see app/constants.ts). Modeled directly on
 # migrate.tf: same runtime (the api image, different entrypoint — see
@@ -11,7 +12,7 @@
 # traffic, so it still fits Cloud Run Jobs' run-to-completion model rather
 # than a Service's request-response model.
 #
-# One image serves all 5 schedules: `containers[0].args` is left unset here
+# One image serves all 8 schedules: `containers[0].args` is left unset here
 # so a direct/manual `gcloud run jobs execute plunk-maintenance` fails loud
 # (see maintenance-runner.ts) instead of silently running the wrong task.
 # Each google_cloud_scheduler_job below supplies its own `--task=<name>` via
@@ -104,6 +105,15 @@ locals {
     "api-request-cleanup"     = "0 3 * * *"
     "idempotency-key-cleanup" = "0 * * * *"
     "email-body-cleanup"      = "0 4 * * *"
+    # Upstream registers these three as BullMQ repeatable jobs every 2-5 minutes;
+    # here they are deliberately coarser to keep Cloud Run Job executions down
+    # (see docs/maintenance-cost-rollout.md). Snooze windows are weeks to years,
+    # so hourly (offset from the other hourly tasks) is plenty.
+    "snooze-sweep" = "30 * * * *"
+    # Campaign engagement counters lag by up to 15 minutes instead of 2.
+    "campaign-stats-sweep" = "*/15 * * * *"
+    # Safety net only: re-queues scheduled emails whose own Cloud Task was lost.
+    "scheduled-email-sweep" = "*/15 * * * *"
   }
 }
 
@@ -145,7 +155,7 @@ resource "google_cloud_scheduler_job" "maintenance" {
       "Content-Type" = "application/json"
     }
 
-    # containerOverrides.args is what selects which of the 5 tasks this
+    # containerOverrides.args is what selects which of the 8 tasks this
     # particular schedule runs — see maintenance-runner.ts's --task= parsing.
     body = base64encode(jsonencode({
       overrides = {

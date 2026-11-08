@@ -33,8 +33,9 @@ const PUBLIC_ROUTES = [
   '/manage',
 ];
 
-// Routes that don't require a project
-const NO_PROJECT_ROUTES = ['/projects/create'];
+// Routes that don't require a project. /account has to be here: deleting your account is
+// only allowed once you have left every project, so the page must stay reachable at zero.
+const NO_PROJECT_ROUTES = ['/projects/create', '/account'];
 
 function App({Component, pageProps}: AppProps) {
   return (
@@ -65,7 +66,7 @@ function AuthGuard({children}: {children: React.ReactNode}) {
 
   // Show loading state while checking authentication (only for protected routes)
   if (isLoading && !isPublicRoute) {
-    return <Loader message="Authenticating..." />;
+    return <Loader message="Authenticating…" />;
   }
 
   // Don't render protected content if redirecting
@@ -90,7 +91,7 @@ function ProjectGuard({children}: {children: React.ReactNode}) {
 
   // Show loading state while checking projects (only for routes that need a project)
   if (isLoading && !isNoProjectRoute) {
-    return <Loader message="Loading project..." />;
+    return <Loader message="Loading project…" />;
   }
 
   // Don't render protected content if redirecting

@@ -18,6 +18,15 @@ export const Keys = {
     passwordResetRateLimit(email: string): string {
       return `auth:password_reset_rate:${email}`;
     },
+    passwordChangeRateLimit(userId: string): string {
+      return `auth:password_change_rate:${userId}`;
+    },
+  },
+  RateLimit: {
+    /** Per-project token bucket for an API endpoint group. See middleware/rateLimit.ts. */
+    bucket(name: string, projectId: string): string {
+      return `ratelimit:${name}:${projectId}`;
+    },
   },
   Domain: {
     id(id: string): string {
@@ -58,14 +67,8 @@ export const Keys = {
     },
   },
   Analytics: {
-    timeseries(projectId: string, startDate: string, endDate: string): string {
-      return `analytics:timeseries:${projectId}:${startDate}:${endDate}`;
-    },
-    campaignStats(projectId: string, startDate: string, endDate: string): string {
-      return `analytics:campaignStats:${projectId}:${startDate}:${endDate}`;
-    },
-    topEvents(projectId: string, limit: number, startDate: string, endDate: string): string {
-      return `analytics:topEvents:${projectId}:${limit}:${startDate}:${endDate}`;
+    query(projectId: string, kind: string, params: string): string {
+      return `analytics:${kind}:${projectId}:${params}`;
     },
   },
   Workflow: {
@@ -85,6 +88,47 @@ export const Keys = {
     },
     owner(projectId: string): string {
       return `membership:owner:${projectId}`;
+    },
+  },
+  Campaign: {
+    /**
+     * Emails sent so far in an in-flight campaign.
+     *
+     * Held in Redis rather than incremented on the campaign row: the send path runs
+     * once per recipient at a concurrency derived from the SES quota, and every one
+     * of those writes would contend for the same row and leave a dead tuple behind.
+     * `Campaign.sentCount` is written once, when the send finalizes.
+     */
+    sentProgress(campaignId: string): string {
+      return `campaign:sent_progress:${campaignId}`;
+    },
+
+    /**
+     * Set of campaigns whose materialized counters are behind their email rows.
+     *
+     * One set for the whole install rather than a key per campaign: the sweep needs to
+     * find the campaigns that changed without scanning the keyspace, and SADD of an id
+     * that is already a member is free. Membership is the only state -- what changed and
+     * how much is re-derived by counting the emails, so a duplicate add costs nothing and
+     * a lost one is corrected by the next event on that campaign.
+     */
+    statsDirty(): string {
+      return 'campaign:stats_dirty';
+    },
+  },
+  Contact: {
+    /**
+     * Sorted set of the `Contact.data` keys a project uses, scored by when each was first
+     * seen. Contact writes add to it, so a new field is offered immediately; the background
+     * scan prunes keys no contact carries any more. See ContactFieldService.
+     */
+    fieldKeys(projectId: string): string {
+      return `contact:field_keys:${projectId}`;
+    },
+
+    /** Coverage and type per data key, as measured by the last background scan. */
+    fieldStats(projectId: string): string {
+      return `contact:field_stats:${projectId}`;
     },
   },
   Project: {

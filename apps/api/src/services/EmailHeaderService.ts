@@ -17,8 +17,10 @@ import {API_URI} from '../app/constants.js';
  *                     gets the bulk suppression headers when sent as a campaign,
  *                     because a mass transactional broadcast is still bulk mail.
  * - `headless`      — raw HTML the sender fully controls; Plunk adds no footer or
- *                     badge to the body. Like transactional, it takes no
- *                     List-Unsubscribe pair but does get the bulk suppression
+ *                     badge to the body. By default it takes no List-Unsubscribe
+ *                     pair, but the sender can supply one by marking their own
+ *                     unsubscribe link `data-plunk-one-click` (see
+ *                     {@link senderOneClickUrl}). Gets the bulk suppression
  *                     headers when sent as a campaign.
  *
  * Note that class is one of two orthogonal axes: it decides the List-Unsubscribe
@@ -59,6 +61,50 @@ export function bodyHasListManagementLink(html: string, contactId: string): bool
   return html.includes(`/unsubscribe/${contactId}`) || html.includes(`/manage/${contactId}`);
 }
 
+/**
+ * Find the sender's own one-click unsubscribe URL in a compiled body: the href of an
+ * `<a>` carrying the `data-plunk-one-click` attribute. This is how a HEADLESS sender
+ * that runs its own preference center gets List-Unsubscribe pointed at its own
+ * endpoint (campaigns have no headers field). The attribute is an explicit opt-in
+ * because the header asserts RFC 8058 support: the URL must unsubscribe on a bare
+ * POST. Only absolute HTTPS URLs qualify, as Gmail and Yahoo require.
+ *
+ * {@link buildEmailHeaders} honours it for `headless` sends only: a marketing email
+ * carries Plunk's footer and Plunk owns its subscription state, so its header keeps
+ * pointing at Plunk.
+ */
+export function senderOneClickUrl(html: string): string | undefined {
+  const tag = html.match(/<a\b[^>]*\bdata-plunk-one-click\b[^>]*>/i)?.[0];
+  const href = tag?.match(/\bhref\s*=\s*(["'])(.*?)\1/i)?.[2]?.trim().replace(/&amp;/gi, '&');
+
+  return href && /^https:\/\/[^\s<>]+$/i.test(href) ? href : undefined;
+}
+
+/**
+ * Tag a list-management URL with the email it was sent in, as `?e=<id>`.
+ *
+ * Recipient-initiated opt-outs are otherwise unattributable: the links are
+ * scoped to the contact, so nothing in the request says which message prompted
+ * it. The parameter is advisory — the endpoint checks the email belongs to the
+ * contact before recording it, and the contact id in the path still governs the
+ * change — so a stripped or rewritten value costs attribution and nothing else.
+ *
+ * Only callers that hold a persisted email row can supply an id. Links rendered
+ * before the email exists (campaign and workflow bodies, `POST /send`) pass
+ * nothing and stay unattributed.
+ */
+export function withSourceEmail(url: string, sourceEmailId?: string): string {
+  if (!sourceEmailId) {
+    return url;
+  }
+
+  // Every caller today passes a query-less URL, but appending a bare `?` to one that already
+  // carries a query would silently produce `...?utm=x?e=y` -- a parameter no endpoint reads.
+  const separator = url.includes('?') ? '&' : '?';
+
+  return `${url}${separator}e=${encodeURIComponent(sourceEmailId)}`;
+}
+
 export interface BuildEmailHeadersParams {
   emailClass: EmailClass;
   /**
@@ -76,10 +122,22 @@ export interface BuildEmailHeadersParams {
    */
   hasListManagementLink?: boolean;
   /**
+   * The sender's own one-click URL (see {@link senderOneClickUrl}). For `headless`
+   * sends, the List-Unsubscribe pair points here instead of Plunk's endpoint. Ignored
+   * for every other class, where Plunk owns list management.
+   */
+  senderUnsubscribeUrl?: string;
+  /**
    * Contact id used to build the List-Unsubscribe URL. Required for the
    * List-Unsubscribe pair to be emitted; omit it and no pair is added.
    */
   unsubscribeId?: string;
+  /**
+   * Id of the email being sent, tagged onto the List-Unsubscribe URL so a
+   * one-click opt-out can be attributed to the message that prompted it.
+   * See {@link withSourceEmail}.
+   */
+  sourceEmailId?: string;
   /**
    * Caller-supplied headers (internal `X-Plunk-*` routing keys already stripped).
    * These override any default header with the same name — see {@link mergeHeaders}.
@@ -94,8 +152,9 @@ export interface BuildEmailHeadersParams {
  *   Emitted whenever the recipient can opt out: for `marketing` sends (which carry
  *   the footer), and for *any* send whose body embeds an unsubscribe/manage link
  *   (`hasListManagementLink`) — a sender who added an opt-out link means it to work,
- *   whatever the class. Transactional mail without such a link gets no pair, per
- *   Gmail/Yahoo's transactional exemption.
+ *   whatever the class. A `headless` send can point the pair at the sender's own
+ *   endpoint instead (`senderUnsubscribeUrl`). Transactional mail without such a link
+ *   gets no pair, per Gmail/Yahoo's transactional exemption.
  * - **Precedence / Auto-Submitted / X-Auto-Response-Suppress** — mark the message as
  *   bulk/automated so receivers suppress auto-replies (out-of-office, read receipts)
  *   instead of looping them back to the sender. This keys on "is this a bulk send?",
@@ -109,7 +168,9 @@ export function buildEmailHeaders({
   emailClass,
   isCampaign = false,
   hasListManagementLink = false,
+  senderUnsubscribeUrl,
   unsubscribeId,
+  sourceEmailId,
   customHeaders,
 }: BuildEmailHeadersParams): Record<string, string> {
   const defaults: Record<string, string> = {};
@@ -127,8 +188,16 @@ export function buildEmailHeaders({
   // unsubscribes on a button click, so a provider POSTing to it would get a
   // response but change nothing. `GET /unsubscribe/:id` on the API redirects to
   // that dashboard page, so this one URL still serves humans who click through.
-  if ((isMarketing || hasListManagementLink) && unsubscribeId) {
-    defaults['List-Unsubscribe'] = `<${API_URI}/unsubscribe/${unsubscribeId}>`;
+  //
+  // A headless sender runs its own list management, so a link it marked as its
+  // one-click endpoint wins. Other classes keep Plunk's URL: Plunk owns their
+  // subscription state, and a marketing body already carries Plunk's footer link.
+  if (senderUnsubscribeUrl && emailClass === 'headless') {
+    defaults['List-Unsubscribe'] = `<${senderUnsubscribeUrl}>`;
+    defaults['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
+  } else if ((isMarketing || hasListManagementLink) && unsubscribeId) {
+    defaults['List-Unsubscribe'] =
+      `<${withSourceEmail(`${API_URI}/unsubscribe/${unsubscribeId}`, sourceEmailId)}>`;
     defaults['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
   }
 

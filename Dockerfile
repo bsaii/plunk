@@ -6,7 +6,7 @@
 # Stage 1: Dependencies (All dependencies for building)
 # ============================================
 # Use build platform (AMD64) to install dependencies, avoiding QEMU issues
-FROM --platform=$BUILDPLATFORM node:20-slim AS deps
+FROM --platform=$BUILDPLATFORM node:24.22.1-slim AS deps
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 WORKDIR /app
@@ -25,7 +25,12 @@ COPY .yarn/releases ./.yarn/releases
 COPY package.json yarn.lock ./
 
 # Copy workspace package.json files
+# Every workspace listed in the root package.json must be present here, even if
+# it is never built or run in the image: `yarn install --immutable` re-resolves
+# the whole workspace graph and fails if a manifest is missing, because the
+# lockfile it produces would differ from the committed one.
 COPY apps/api/package.json ./apps/api/
+COPY apps/mcp/package.json ./apps/mcp/
 COPY apps/smtp/package.json ./apps/smtp/
 COPY apps/web/package.json ./apps/web/
 COPY apps/landing/package.json ./apps/landing/
@@ -57,7 +62,7 @@ RUN --mount=type=cache,target=/root/.yarn/berry/cache,sharing=locked \
 # Stage 1b: Production Dependencies for API/SMTP
 # ============================================
 # Install only production dependencies needed for API and SMTP services
-FROM --platform=$BUILDPLATFORM node:20-slim AS prod-deps
+FROM --platform=$BUILDPLATFORM node:24.22.1-slim AS prod-deps
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 WORKDIR /app
@@ -89,7 +94,7 @@ RUN --mount=type=cache,target=/root/.yarn/berry/cache,sharing=locked \
 # Stage 2: Builder
 # ============================================
 # Builder runs on target platform to generate platform-specific artifacts
-FROM node:20-slim AS builder
+FROM node:24.22.1-slim AS builder
 ARG TARGETPLATFORM
 
 # Build-time arguments for URL configuration
@@ -128,7 +133,14 @@ COPY docker/generate-url-manifest.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/generate-url-manifest.sh
 
 # Step 1: Copy and build shared packages (these change less frequently)
-# Shared packages are dependencies for apps, so build them first
+# Shared packages are dependencies for apps, so build them first.
+#
+# Note on @plunk/mcp: despite the name it lives in apps/, and no stage copies
+# apps/mcp source into the builder, so the "@plunk/*" filter below never matches
+# it. Do not "fix" this with an explicit --filter="!@plunk/mcp" — turbo errors
+# with "No package found with name" when a negative filter names a workspace
+# that is not on disk. The MCP server is an stdio binary users run via
+# `npx @plunk/mcp`; it is published to npm by npm-publish.yml, not shipped here.
 COPY packages ./packages
 RUN yarn workspace @plunk/db db:generate
 RUN --mount=type=cache,target=/app/.turbo,sharing=locked \
@@ -229,7 +241,7 @@ RUN mkdir -p \
 # ============================================
 # Stage 3: Production Runtime
 # ============================================
-FROM node:20-alpine AS runner
+FROM node:24.22.1-alpine AS runner
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 WORKDIR /app
@@ -351,7 +363,7 @@ EXPOSE 80 465 587
 
 # Health check through nginx
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD curl -f http://localhost:80/ || exit 1
+  CMD curl -f http://localhost:${NGINX_PORT:-80}/ || exit 1
 
 # Default to running all services via entrypoint
 ENV SERVICE=all

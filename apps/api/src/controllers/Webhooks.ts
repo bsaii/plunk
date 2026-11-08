@@ -14,13 +14,73 @@ import {DASHBOARD_URI, LANDING_URI, STRIPE_ENABLED, STRIPE_WEBHOOK_SECRET} from 
 import {stripe} from '../app/stripe.js';
 import {prisma} from '../database/prisma.js';
 import {BillingLimitService} from '../services/BillingLimitService.js';
+import {CampaignService} from '../services/CampaignService.js';
+import {CardVerificationService} from '../services/CardVerificationService.js';
 import {ContactService} from '../services/ContactService.js';
 import {EventService} from '../services/EventService.js';
 import {MembershipService} from '../services/MembershipService.js';
 import {MeterService} from '../services/MeterService.js';
 import {NtfyService} from '../services/NtfyService.js';
+import {OutstandingInvoiceService} from '../services/OutstandingInvoiceService.js';
+import {QueueService} from '../services/QueueService.js';
 import {SecurityService} from '../services/SecurityService.js';
 import {CatchAsync} from '../utils/asyncHandler.js';
+
+/**
+ * How much a status is allowed to outrank the one already on the row.
+ *
+ * SES publishes its events through SNS, which makes no ordering guarantee, so this handler
+ * sees them in an arbitrary order. Without a precedence the last event to arrive wins, and
+ * "opened, then reported as spam" -- the ordinary way a complaint happens -- lands as often
+ * as not in the order that leaves the row reading OPENED with `complainedAt` set. Measured
+ * on production data, that was one complaint in five.
+ *
+ * Complaints outrank bounces because a recipient who reported the mail is the more useful
+ * fact about that email, and because the pair is close to impossible anyway: an address
+ * that hard-bounced never received anything to report.
+ *
+ * Statuses not listed here (PENDING, SENDING, FAILED, RECEIVED) are outside this handler's
+ * concern; it is only ever called with the five SES event outcomes.
+ */
+const STATUS_RANK: Partial<Record<EmailStatus, number>> = {
+  [EmailStatus.SENT]: 1,
+  [EmailStatus.DELIVERED]: 2,
+  [EmailStatus.OPENED]: 3,
+  [EmailStatus.CLICKED]: 4,
+  [EmailStatus.BOUNCED]: 5,
+  [EmailStatus.COMPLAINED]: 6,
+};
+
+/**
+ * The status to write, or `undefined` to leave the column as it is.
+ *
+ * Undefined rather than the current value so the caller can hand the result straight to
+ * Prisma, which reads `undefined` as "don't touch this column" and so never writes a
+ * no-op update.
+ */
+export function nextStatus(current: EmailStatus, incoming?: EmailStatus): EmailStatus | undefined {
+  if (!incoming) {
+    return undefined;
+  }
+
+  // An unranked current status (PENDING, SENDING, FAILED) is always superseded by a real
+  // SES outcome: those mean "we have heard nothing back yet", and now we have.
+  const currentRank = STATUS_RANK[current] ?? 0;
+  const incomingRank = STATUS_RANK[incoming] ?? 0;
+
+  return incomingRank >= currentRank ? incoming : undefined;
+}
+
+/**
+ * Whether SES judged an Open to be made by software rather than a person. Mail providers fetch
+ * the tracking pixel on their own -- Gmail's servers do it on delivery, whether or not anyone
+ * reads the email -- and SES marks those fetches `isBotEvent: "Likely"`. Measured, Gmail's own
+ * fetch was "Likely" and every real open was "Unlikely", including one seconds after delivery
+ * and Apple Mail's proxy. An Open without the mark counts, as every Open did before SES added it.
+ */
+export function isAutomaticOpen(open?: {isBotEvent?: unknown} | null): boolean {
+  return open?.isBotEvent === 'Likely';
+}
 
 /**
  * Webhooks Controller
@@ -40,8 +100,24 @@ export class Webhooks {
       // Verify SNS message signature before processing anything
       const signatureValid = await SecurityService.verifySnsSignature(req.body as Record<string, string>);
       if (!signatureValid) {
-        signale.warn('[WEBHOOK] SNS signature verification failed — request rejected');
+        // Error level, not warn: this is indistinguishable from a working install right up
+        // until someone notices that no engagement has been recorded for days. Every event
+        // for every project drops here, and nothing else in the system counts the misses.
+        signale.error('[WEBHOOK] SNS signature verification failed — request rejected. All SES events are being dropped.');
         return res.status(403).json({success: false, message: 'Invalid SNS signature'});
+      }
+
+      // A valid signature only proves AWS sent it: the topic must also be in our own account,
+      // or anyone could subscribe this endpoint to a topic of theirs and publish forged events.
+      // Checked before the subscription branch, so a foreign topic is never confirmed either.
+      const topicOrigin = await SecurityService.snsTopicOrigin(req.body.TopicArn);
+      if (topicOrigin === 'unknown') {
+        // 5xx makes SNS retry, so a genuine event is delivered again once the lookup works
+        return res.status(503).json({success: false, message: 'Could not verify SNS topic'});
+      }
+      if (topicOrigin === 'foreign') {
+        signale.warn(`[WEBHOOK] SNS message rejected — topic is not in this AWS account: ${String(req.body.TopicArn)}`);
+        return res.status(403).json({success: false, message: 'Untrusted SNS topic'});
       }
 
       // Handle SNS subscription confirmation FIRST (before parsing Message field)
@@ -303,13 +379,38 @@ export class Webhooks {
       });
 
       if (!email) {
-        signale.warn(`[WEBHOOK] Email not found for messageId: ${messageId}`);
+        // Error level for the same reason as a signature failure: an event that matches no
+        // email row is silently lost, and SES gives up after its retries. A run of these
+        // means the send path is not stamping `messageId`, which is invisible from outside.
+        signale.error(`[WEBHOOK] ${eventType} event dropped — no email found for messageId: ${messageId}`);
         return res.status(404).json({success: false, error: 'Email not found'});
       }
+
+      // Mail addressed to the SES mailbox simulator is a rehearsal of bounce handling, not a
+      // reputation event: it never leaves AWS, and AWS keeps it out of its own bounce rates,
+      // complaint rates, sending quotas and reputation metrics. The event is processed
+      // exactly like any other below -- status transition, activity feed, tracked event,
+      // contact suppression -- but it raises no operator alert and runs no enforcement, so a
+      // sender testing their integration cannot warn or disable their own project. The rates
+      // themselves exclude these emails at the source; see SecurityService.calculateRates.
+      const isSimulated = email.simulated;
 
       const now = new Date();
       const updateData: Prisma.EmailUpdateInput = {};
       const eventName = `email.${eventType.toLowerCase()}`;
+
+      // SNS is at-least-once, so the same bounce or complaint notification arrives again
+      // hours or days later. `email` is the row as it stood before this event, so these read
+      // whether the suppression had already been recorded by an earlier delivery. Everything
+      // below that is not idempotent -- the first-seen timestamps, the operator alert, and
+      // the reputation enforcement that can disable a project -- is gated on them.
+      const alreadyBounced = !!email.bouncedAt;
+      const alreadyComplained = !!email.complainedAt;
+
+      // Set by the Bounce branch when the event counts toward the bounce rate. Only a
+      // permanent bounce does: transient bounces are not counted, and an unknown type is
+      // suppressed but deliberately left out of the rate -- see the branch for why.
+      let countsTowardBounceRate = false;
 
       // Base event data with email metadata
       const baseEventData = {
@@ -337,7 +438,17 @@ export class Webhooks {
           break;
 
         case 'Open':
-          signale.success(`[WEBHOOK] Open received for ${email.contact.email} from ${email.project.name}`);
+          // Counting an automatic fetch as an open would stamp openedAt, move segments and resume
+          // workflows waiting for a real one, so nothing is written for it
+          if (isAutomaticOpen(body.open)) {
+            signale.info(`[WEBHOOK] Automatic open ignored for ${email.contact.email} from ${email.project.name}`);
+            return res.status(200).json({success: true});
+          }
+          // The mark is logged only when it is text, so an unexpected payload cannot make logging
+          // throw and lose an open that would have counted
+          signale.success(
+            `[WEBHOOK] Open received for ${email.contact.email} from ${email.project.name} (isBotEvent: ${typeof body.open?.isBotEvent === 'string' ? body.open.isBotEvent : 'none'})`,
+          );
           // Only set openedAt on first open
           if (!email.openedAt) {
             updateData.openedAt = now;
@@ -380,20 +491,27 @@ export class Webhooks {
             // Hard bounce - counts toward bounce rate and unsubscribes contact
             signale.warn(`[WEBHOOK] Permanent bounce received for ${email.contact.email} from ${email.project.name}`);
             updateData.status = EmailStatus.BOUNCED;
-            updateData.bouncedAt = now;
-            // Unsubscribe contact on permanent bounce
+            // The first bounce is the one that happened; a redelivery of that notification
+            // must not move the timestamp forward into a window it does not belong to.
+            updateData.bouncedAt = email.bouncedAt ?? now;
+            countsTowardBounceRate = true;
+            // Unsubscribe contact on permanent bounce. Clearing `snoozedUntil` is what stops
+            // the snooze sweep from resubscribing a hard-bounced address later and mailing it
+            // again. See SNOOZE_CLEARED_ON_WRITE in ContactService.
             await prisma.contact.update({
               where: {id: email.contactId},
-              data: {subscribed: false},
+              data: {subscribed: false, snoozedUntil: null},
             });
             eventData = {
               ...baseEventData,
               bounceType,
-              bouncedAt: now.toISOString(),
+              bouncedAt: (email.bouncedAt ?? now).toISOString(),
             };
 
             // Send notification about permanent bounce
-            await NtfyService.notifyEmailBounce(email.project.name, email.projectId, email.contact.email, bounceType);
+            if (!isSimulated && !alreadyBounced) {
+              await NtfyService.notifyEmailBounce(email.project.name, email.projectId, email.contact.email, bounceType);
+            }
           } else if (isTransientBounce) {
             // Soft bounce (e.g., out-of-office, mailbox full) - don't count toward bounce rate
             signale.info(
@@ -412,18 +530,24 @@ export class Webhooks {
               `[WEBHOOK] Unknown bounce type (${bounceType}) received for ${email.contact.email} from ${email.project.name} - treating as permanent`,
             );
             updateData.status = EmailStatus.BOUNCED;
-            updateData.bouncedAt = now;
+            updateData.bouncedAt = email.bouncedAt ?? now;
+            // Suppressed like a permanent bounce, but deliberately not counted toward the
+            // bounce rate: an unclassifiable bounce is the one case where we are guessing,
+            // and a guess should not be able to disable a project.
+            // Suppress and clear any snooze, exactly as the permanent-bounce branch does.
             await prisma.contact.update({
               where: {id: email.contactId},
-              data: {subscribed: false},
+              data: {subscribed: false, snoozedUntil: null},
             });
             eventData = {
               ...baseEventData,
               bounceType,
-              bouncedAt: now.toISOString(),
+              bouncedAt: (email.bouncedAt ?? now).toISOString(),
             };
 
-            await NtfyService.notifyEmailBounce(email.project.name, email.projectId, email.contact.email, bounceType);
+            if (!isSimulated && !alreadyBounced) {
+              await NtfyService.notifyEmailBounce(email.project.name, email.projectId, email.contact.email, bounceType);
+            }
           }
           break;
         }
@@ -431,19 +555,23 @@ export class Webhooks {
         case 'Complaint':
           signale.warn(`[WEBHOOK] Complaint received for ${email.contact.email} from ${email.project.name}`);
           updateData.status = EmailStatus.COMPLAINED;
-          updateData.complainedAt = now;
-          // Unsubscribe contact on complaint
+          // As with bounces, keep the timestamp of the complaint that actually arrived.
+          updateData.complainedAt = email.complainedAt ?? now;
+          // Unsubscribe contact on complaint. `snoozedUntil` is cleared so the snooze sweep
+          // can never resubscribe someone who reported this mail as spam.
           await prisma.contact.update({
             where: {id: email.contactId},
-            data: {subscribed: false},
+            data: {subscribed: false, snoozedUntil: null},
           });
           eventData = {
             ...baseEventData,
-            complainedAt: now.toISOString(),
+            complainedAt: (email.complainedAt ?? now).toISOString(),
           };
 
           // Send notification about complaint
-          await NtfyService.notifyEmailComplaint(email.project.name, email.projectId, email.contact.email);
+          if (!isSimulated && !alreadyComplained) {
+            await NtfyService.notifyEmailComplaint(email.project.name, email.projectId, email.contact.email);
+          }
           break;
 
         default:
@@ -451,20 +579,48 @@ export class Webhooks {
           return res.status(200).json({success: true});
       }
 
-      // Update email with new status and timestamps
+      // Update email with new status and timestamps.
+      //
+      // `status` is dropped from the update when it would walk backwards over a
+      // suppression. SES publishes through SNS, which does not guarantee ordering, so the
+      // ordinary sequence "opened, then reported as spam" reaches this handler the other
+      // way round often enough to matter -- one complaint in five, measured. Applying the
+      // Open blindly left the row reading `OPENED` with `complainedAt` set, and anything
+      // that selects complaints by status then silently missed it.
       await prisma.email.update({
         where: {id: email.id},
-        data: updateData,
+        // `undefined` leaves the column alone, which is what nextStatus returns when the
+        // event would downgrade a suppression.
+        data: {...updateData, status: nextStatus(email.status, updateData.status as EmailStatus | undefined)},
       });
+
+      // The campaign counters the stats endpoint reads live on the campaign row, and this
+      // event has just moved one of them. They are not incremented from here: this handler
+      // runs once per recipient per event, so a write per event would serialize thousands of
+      // updates on a single row -- the same reason `sentCount` is not incremented in the send
+      // path either. Marking the campaign costs one Redis SADD, and the sweep recounts it.
+      if (email.campaignId) {
+        await CampaignService.markStatsDirty(email.campaignId);
+      }
 
       // Track event (this will trigger workflows)
       await EventService.trackEvent(email.projectId, eventName, email.contactId, email.id, eventData);
 
-      // Check security limits only for permanent bounces and complaints
-      // Transient bounces (soft bounces) don't count toward bounce rate
-      const isPermanentBounce = eventType === 'Bounce' && body.bounce?.bounceType === 'Permanent';
-      if (isPermanentBounce || eventType === 'Complaint') {
-        await SecurityService.checkAndEnforceSecurityLimits(email.projectId);
+      // Check security limits only when this event is a suppression the project has not been
+      // charged for yet. Transient bounces never count. Neither does a redelivered
+      // notification: the rates are computed by counting `bouncedAt`/`complainedAt` rows, so a
+      // second copy of an old event leaves every number exactly where it was. Re-running
+      // enforcement on one could only re-disable a project over history it has already been
+      // judged against -- which is what happened to projects that were manually re-enabled.
+      const isNewSuppression =
+        (countsTowardBounceRate && !alreadyBounced) || (eventType === 'Complaint' && !alreadyComplained);
+      if (isNewSuppression && !isSimulated) {
+        // Only one metric moved, so only that metric's thresholds may disable the project.
+        // One notification is one event type, so it can never be both.
+        await SecurityService.checkAndEnforceSecurityLimits(
+          email.projectId,
+          eventType === 'Complaint' ? 'complaint' : 'bounce',
+        );
       }
 
       signale.success(`[WEBHOOK] Processed ${eventType} event for email ${email.id}`);
@@ -521,36 +677,52 @@ export class Webhooks {
             break;
           }
 
-          // Update project with customer and subscription IDs
+          // The card Checkout saved. Recorded before anything else so that the card-change
+          // webhooks Checkout may also fire recognise it as already in hand, not a new card.
+          const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+          const paymentMethodId =
+            typeof subscription.default_payment_method === 'string'
+              ? subscription.default_payment_method
+              : (subscription.default_payment_method?.id ?? null);
+
+          // Update project with customer and subscription IDs. PENDING until the off-session
+          // charge returns a verdict; the project is usable in the meantime, which is a few
+          // seconds of exposure against a signal that otherwise takes a month to arrive.
           const updatedProject = await prisma.project.update({
             where: {id: projectId},
             data: {
               customer: customerId,
               subscription: subscriptionId,
+              cardVerification: 'PENDING',
+              cardVerificationAt: new Date(),
+              cardVerificationSession: session.id,
+              cardVerificationPaymentMethod: paymentMethodId,
+              cardVerificationAttempts: 0,
             },
           });
 
-          // Base onboarding credit: refund the 1-unit card-verification charge
-          let creditBalance = -100;
+          await stripe.customers.update(customerId, {name: updatedProject.name});
 
-          // Switching-offer promo: 2 extra units of credit if the customer typed SWITCH
-          // into the Promo code custom field on Stripe Checkout.
           const promoField = session.custom_fields?.find((f) => f.key === 'promo_code');
           const promoCode = promoField?.text?.value?.trim().toUpperCase();
-          if (promoCode === 'SWITCH') {
-            creditBalance -= 200;
-            signale.success(`[WEBHOOK] SWITCH promo applied for project ${projectId}`);
-          } else if (promoCode) {
+          if (promoCode && promoCode !== 'SWITCH') {
             signale.info(`[WEBHOOK] Unknown promo code "${promoCode}" entered for project ${projectId}`);
           }
 
-          // Update Stripe customer name to match project name and add credit for onboarding fee
-          await stripe.customers.update(customerId, {
-            name: updatedProject.name,
-            balance: creditBalance,
+          // Verify the card accepts a merchant-initiated charge before trusting it with a
+          // month of usage. Queued rather than inline: confirming a PaymentIntent can outlast
+          // Stripe's webhook timeout, and a timeout means a redelivery — and a second charge.
+          // Credit for the verification charge is applied by the job, once the outcome is known.
+          await QueueService.queueCardVerification({
+            projectId,
+            customerId,
+            currency: session.currency ?? 'eur',
+            attemptKey: session.id,
+            ...(paymentMethodId && {paymentMethodId}),
+            ...(promoCode && {promoCode}),
           });
 
-          signale.success(`[WEBHOOK] Checkout completed for project ${projectId}`);
+          signale.success(`[WEBHOOK] Checkout completed for project ${projectId}, card verification queued`);
 
           // Send notification about subscription started
           await NtfyService.notifySubscriptionStarted(updatedProject.name, projectId, subscriptionId);
@@ -571,16 +743,32 @@ export class Webhooks {
             break;
           }
 
+          // Verification invoices are bookkeeping for a charge the verification job already
+          // handled; they neither settle debt nor deserve an alert.
+          if (invoice.metadata?.plunk_purpose === 'card_verification') {
+            break;
+          }
+
           signale.success(`[WEBHOOK] Invoice paid for project ${project.name} (${project.id})`);
 
           // Re-enable the project only if it was previously disabled for a failed payment.
           // Projects disabled for other reasons (reputation, phishing, manual) must stay disabled.
           if (project.disabled && project.disabledReason === 'PAYMENT_FAILED') {
-            await prisma.project.update({
-              where: {id: project.id},
-              data: {disabled: false, disabledReason: null},
-            });
-            signale.success(`[WEBHOOK] Project ${project.name} (${project.id}) re-enabled after payment`);
+            // Only once nothing is owed. Any paid invoice used to count, including the 0.00
+            // first invoice of a brand-new subscription — a way to walk away from the debt.
+            const outstanding = await OutstandingInvoiceService.list(customerId);
+
+            if (outstanding.length === 0) {
+              await prisma.project.update({
+                where: {id: project.id},
+                data: {disabled: false, disabledReason: null},
+              });
+              signale.success(`[WEBHOOK] Project ${project.name} (${project.id}) re-enabled after payment`);
+            } else {
+              signale.info(
+                `[WEBHOOK] Project ${project.name} (${project.id}) still has ${outstanding.length} outstanding invoice(s), staying paused`,
+              );
+            }
           }
 
           // Send notification about invoice payment
@@ -671,9 +859,31 @@ export class Webhooks {
           break;
         }
 
+        case 'customer.updated': {
+          const customer = event.data.object;
+          const previous = event.data.previous_attributes as Partial<Stripe.Customer> | undefined;
+          const paymentMethod = customer.invoice_settings?.default_payment_method;
+          const paymentMethodId = typeof paymentMethod === 'string' ? paymentMethod : paymentMethod?.id;
+
+          // Only a newly chosen default card matters here; a cleared one leaves nothing to test.
+          if (previous?.invoice_settings?.default_payment_method !== undefined && paymentMethodId) {
+            await CardVerificationService.handlePaymentMethodChange(customer.id, paymentMethodId);
+          }
+          break;
+        }
+
         case 'customer.subscription.updated': {
           const subscription = event.data.object;
           const subscriptionId = subscription.id;
+          const previous = event.data.previous_attributes as Partial<Stripe.Subscription> | undefined;
+          const newPaymentMethod = subscription.default_payment_method;
+          const newPaymentMethodId = typeof newPaymentMethod === 'string' ? newPaymentMethod : newPaymentMethod?.id;
+
+          // The portal may set the card on the subscription rather than the customer. Same
+          // handling either way; the handler ignores the change it makes itself.
+          if (previous?.default_payment_method !== undefined && newPaymentMethodId) {
+            await CardVerificationService.handlePaymentMethodChange(subscription.customer as string, newPaymentMethodId);
+          }
 
           // Find project by subscription ID
           const project = await prisma.project.findUnique({

@@ -4,7 +4,12 @@
  */
 
 export * from './activity.js';
+export * from './analytics.js';
 export * from './billing.js';
 export * from './campaign.js';
+export * from './contact.js';
+export * from './email.js';
 export * from './membership.js';
+export * from './user.js';
 export * from './verification.js';
+export * from './workflow.js';

@@ -1,20 +1,27 @@
-import {CampaignStatus, EmailSourceType, EmailStatus} from '@plunk/db';
+import {CampaignStatus, EmailSourceType, EmailStatus, WorkflowExecutionStatus} from '@plunk/db';
 import {type Job, Queue} from 'bullmq';
 import type {RedisOptions} from 'ioredis';
 import signale from 'signale';
 import type {
   ApiRequestCleanupJobData,
-  IdempotencyKeyCleanupJobData,
   BulkContactActionJobData,
   BulkContactActionSelector,
   CampaignBatchJobData,
+  CampaignStatsSweepJobData,
+  CardVerificationJobData,
+  CardVerificationSweepJobData,
   ContactImportJobData,
   DomainVerificationJobData,
+  CampaignCancelCleanupJobData,
+  ContactFieldsJobData,
   EmailBodyCleanupJobData,
+  IdempotencyKeyCleanupJobData,
   MeterEventJobData,
   ScheduledCampaignJobData,
+  ScheduledEmailSweepJobData,
   SegmentCountJobData,
   SendEmailJobData,
+  SnoozeSweepJobData,
   WorkflowStepJobData,
 } from '@plunk/types';
 
@@ -23,6 +30,8 @@ import {prisma} from '../database/prisma.js';
 import {getBullMqRedisOptions} from '../database/redis.js';
 import {getQueueAdapter} from '../queue/adapter.js';
 import type {QueuedJob} from '../queue/types.js';
+
+import {ThrottleService} from './ThrottleService.js';
 
 /**
  * Queue Configuration
@@ -168,6 +177,22 @@ export const emailBodyCleanupQueue = new Queue<EmailBodyCleanupJobData>('email-b
   },
 });
 
+export const campaignCancelCleanupQueue = new Queue<CampaignCancelCleanupJobData>('campaign-cancel-cleanup', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    // Retried generously: the job is idempotent (it deletes what is left and re-checks
+    // before promoting the campaign), and a campaign stuck at CANCELLED with nothing
+    // sent is precisely the state this feature exists to avoid.
+    attempts: 5,
+    backoff: {
+      type: 'exponential',
+      delay: 10000,
+    },
+    removeOnComplete: 100,
+    removeOnFail: 500,
+  },
+});
+
 export const bulkContactQueue = new Queue<BulkContactActionJobData>('bulk-contact-actions', {
   connection: redisConnection,
   defaultJobOptions: {
@@ -191,6 +216,104 @@ export const meterQueue = new Queue<MeterEventJobData>('meter', {
     },
     removeOnComplete: 5000,
     removeOnFail: 10000,
+  },
+});
+
+// Retries here only cover soft failures (network, Stripe 5xx, issuer timeouts). A hard
+// decline is a verdict, not a failure, so the processor resolves it without throwing.
+export const cardVerificationQueue = new Queue<CardVerificationJobData>('card-verification', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 4,
+    backoff: {
+      type: 'exponential',
+      delay: 10000,
+    },
+    removeOnComplete: 500,
+    removeOnFail: 1000,
+  },
+});
+
+// Reconciles campaign counters against the email rows the events landed on. Retries are
+// pointless here beyond a transient blip: whatever is still dirty is swept again on the next
+// run, so a failed sweep costs a couple of minutes of staleness rather than data.
+export const campaignStatsSweepQueue = new Queue<CampaignStatsSweepJobData>('campaign-stats-sweep', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 2,
+    backoff: {
+      type: 'exponential',
+      delay: 10000,
+    },
+    removeOnComplete: 20,
+    removeOnFail: 50,
+  },
+});
+
+export const cardVerificationSweepQueue = new Queue<CardVerificationSweepJobData>('card-verification-sweep', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 2,
+    backoff: {
+      type: 'exponential',
+      delay: 30000,
+    },
+    removeOnComplete: 20,
+    removeOnFail: 50,
+  },
+});
+
+/**
+ * Resubscribes contacts whose snooze window has ended. Retries are cheap and safe: the sweep
+ * only ever acts on contacts that are still due, so a repeat run after a failure does nothing
+ * to the ones it already woke.
+ */
+export const snoozeSweepQueue = new Queue<SnoozeSweepJobData>('snooze-sweep', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 2,
+    backoff: {
+      type: 'exponential',
+      delay: 30000,
+    },
+    removeOnComplete: 20,
+    removeOnFail: 50,
+  },
+});
+
+/**
+ * Re-queues scheduled transactional emails whose time has passed while they are still
+ * SCHEDULED, which only happens when their delayed job was lost. Safe to repeat: the email
+ * processor only promotes an email that is still scheduled and due.
+ */
+export const scheduledEmailSweepQueue = new Queue<ScheduledEmailSweepJobData>('scheduled-email-sweep', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 2,
+    backoff: {
+      type: 'exponential',
+      delay: 30000,
+    },
+    removeOnComplete: 20,
+    removeOnFail: 50,
+  },
+});
+
+/**
+ * Measures coverage and type of a project's custom contact fields. One job per project at a
+ * time: the job id is the project, so writes that discover new keys while a scan is queued
+ * collapse onto it. Completed and failed jobs are removed so the id frees up for the next one.
+ */
+export const contactFieldsQueue = new Queue<ContactFieldsJobData>('contact-fields', {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 2,
+    backoff: {
+      type: 'exponential',
+      delay: 30000,
+    },
+    removeOnComplete: true,
+    removeOnFail: true,
   },
 });
 
@@ -232,6 +355,60 @@ export class QueueService {
   }
 
   /**
+   * Move a scheduled email's job to its new time. The job normally still waits in the delayed
+   * set. If it is gone or can no longer be moved, a fresh one is added under a new id, since
+   * BullMQ ignores an add whose id it still remembers; whichever job fires at the wrong time
+   * finds the email not yet due and does nothing.
+   */
+  public static async rescheduleEmail(emailId: string, delay: number): Promise<void> {
+    const job = await emailQueue.getJob(`email-${emailId}`);
+
+    try {
+      if (job && (await job.isDelayed())) {
+        await job.changeDelay(delay);
+        return;
+      }
+    } catch (error) {
+      signale.warn(`[QUEUE] Could not move the job of email ${emailId}, adding a new one:`, error);
+    }
+
+    // Goes through the queue adapter so it also works under REALTIME_QUEUE_BACKEND=cloud-tasks,
+    // where there is no BullMQ job to move (getJob above returns null) and the original task
+    // can't be cancelled: it fires at the old time, finds the email not yet due, and does nothing.
+    await getQueueAdapter().enqueue('email', {emailId}, {
+      delayMs: delay,
+      jobId: `email-${emailId}-${Date.now()}`,
+      emailPriority: emailPriorityFor(EmailSourceType.TRANSACTIONAL) as 1 | 5 | 10,
+    });
+  }
+
+  /**
+   * Drop the queued job of an email that will no longer be sent. Best effort: a job the
+   * worker has just picked up cannot be removed, and finds the email no longer sendable. Under
+   * REALTIME_QUEUE_BACKEND=cloud-tasks there is no BullMQ job to remove; the task still fires
+   * and the processor finds the email no longer sendable.
+   */
+  public static async removeEmailJob(emailId: string): Promise<void> {
+    try {
+      const job = await emailQueue.getJob(`email-${emailId}`);
+
+      if (job && ((await job.isDelayed()) || (await job.isWaiting()))) {
+        await job.remove();
+      }
+    } catch (error) {
+      signale.warn(`[QUEUE] Could not remove the job of email ${emailId}:`, error);
+    }
+  }
+
+  /** Re-queue a scheduled email whose time has passed but whose job was lost */
+  public static async requeueScheduledEmail(emailId: string): Promise<void> {
+    await getQueueAdapter().enqueue('email', {emailId}, {
+      jobId: `email-sweep-${emailId}`,
+      emailPriority: emailPriorityFor(EmailSourceType.TRANSACTIONAL) as 1 | 5 | 10,
+    });
+  }
+
+  /**
    * Add campaign batch to queue for processing
    */
   public static async queueCampaignBatch(data: CampaignBatchJobData): Promise<QueuedJob<CampaignBatchJobData>> {
@@ -250,6 +427,23 @@ export class QueueService {
       'workflow',
       {executionId, stepId, type: 'process-step'},
       {delayMs: delay, jobId: `workflow-${executionId}-${stepId}`},
+    );
+  }
+
+  /**
+   * Queue the end of a DELAY step that has no step after it, so the execution completes
+   * when the delay runs out instead of staying WAITING forever
+   */
+  public static async queueWorkflowDelayEnd(
+    executionId: string,
+    stepId: string,
+    stepExecutionId: string,
+    delayMs: number,
+  ): Promise<QueuedJob<WorkflowStepJobData>> {
+    return getQueueAdapter().enqueue(
+      'workflow',
+      {executionId, stepId, stepExecutionId, type: 'delay-end'},
+      {delayMs, jobId: `workflow-delay-end-${stepExecutionId}`},
     );
   }
 
@@ -304,6 +498,25 @@ export class QueueService {
     if (job) {
       await job.remove();
     }
+  }
+
+  /**
+   * Queue the cleanup that returns a cancelled campaign to draft.
+   *
+   * The job id is derived from the campaign so that re-running `cancel` on a campaign
+   * whose cleanup died mid-way -- the repair path -- re-uses the existing job instead
+   * of starting a second one racing it over the same rows.
+   */
+  public static async queueCampaignCancelCleanup(
+    campaignId: string,
+    projectId: string,
+    cancelledAt: Date,
+  ): Promise<void> {
+    await campaignCancelCleanupQueue.add(
+      'cleanup',
+      {campaignId, projectId, cancelledAt: cancelledAt.toISOString()},
+      {jobId: `campaign-cancel-cleanup-${campaignId}`},
+    );
   }
 
   /**
@@ -369,6 +582,21 @@ export class QueueService {
   ): Promise<QueuedJob<MeterEventJobData>> {
     return getQueueAdapter().enqueue('meter', {customerId, value, idempotencyKey}, {
       jobId: idempotencyKey ? `meter-${idempotencyKey}` : undefined,
+    });
+  }
+
+  /**
+   * Queue an off-session card verification charge, at activation or after a card change.
+   *
+   * jobId is derived from the attempt key so a redelivered webhook cannot enqueue a second
+   * charge, backing up the Stripe-side idempotency key in the processor.
+   */
+  public static async queueCardVerification(
+    data: CardVerificationJobData,
+    jobId?: string,
+  ): Promise<Job<CardVerificationJobData>> {
+    return cardVerificationQueue.add('verify-card', data, {
+      jobId: jobId ?? `card-verification-${data.attemptKey}`,
     });
   }
 
@@ -595,20 +823,43 @@ export class QueueService {
   public static async cancelAllProjectJobs(projectId: string): Promise<void> {
     signale.info(`[QUEUE] Cancelling all pending jobs for project ${projectId}`);
 
-    // Cancel all scheduled campaigns for this project
-    const scheduledCampaigns = await scheduledQueue.getJobs(['waiting', 'delayed']);
-    for (const job of scheduledCampaigns) {
-      // We need to check if the campaign belongs to this project
-      // by looking up the campaign in the database
-      const campaign = await prisma.campaign.findUnique({
-        where: {id: job.data.campaignId},
-        select: {projectId: true},
+    // Cancel all scheduled campaigns for this project. A disable is final for what was planned:
+    // re-enabling the project must not send them, so the campaign itself is cancelled, not only its job
+    const scheduledCampaigns = await prisma.campaign.findMany({
+      where: {projectId, status: CampaignStatus.SCHEDULED},
+      select: {id: true},
+    });
+
+    if (scheduledCampaigns.length > 0) {
+      await prisma.campaign.updateMany({
+        where: {id: {in: scheduledCampaigns.map(c => c.id)}, status: CampaignStatus.SCHEDULED},
+        data: {status: CampaignStatus.CANCELLED},
       });
 
-      if (campaign?.projectId === projectId) {
-        await job.remove();
-        signale.info(`[QUEUE] Removed scheduled campaign job ${job.id}`);
+      for (const campaign of scheduledCampaigns) {
+        await this.cancelScheduledCampaign(campaign.id);
       }
+
+      signale.info(`[QUEUE] Cancelled ${scheduledCampaigns.length} scheduled campaigns for project ${projectId}`);
+    }
+
+    // Cancel scheduled transactional emails (`delivery.at`) for the same reason, and release
+    // the throttle claims they held. Their queued jobs find them CANCELLED and do nothing.
+    const scheduledEmails = await prisma.email.findMany({
+      where: {projectId, status: EmailStatus.SCHEDULED},
+      select: {id: true},
+    });
+
+    if (scheduledEmails.length > 0) {
+      const ids = scheduledEmails.map(e => e.id);
+
+      await prisma.email.updateMany({
+        where: {id: {in: ids}, status: EmailStatus.SCHEDULED},
+        data: {status: EmailStatus.CANCELLED, error: 'Project is disabled'},
+      });
+      await ThrottleService.releaseForEmails(ids);
+
+      signale.info(`[QUEUE] Cancelled ${ids.length} scheduled emails for project ${projectId}`);
     }
 
     // Cancel all pending emails for this project
@@ -639,18 +890,23 @@ export class QueueService {
       }
     }
 
-    // Cancel all pending workflow steps for this project
-    const workflowSteps = await workflowQueue.getJobs(['waiting', 'delayed']);
-    for (const job of workflowSteps) {
-      const execution = await prisma.workflowExecution.findUnique({
-        where: {id: job.data.executionId},
-        select: {workflow: {select: {projectId: true}}},
-      });
+    // Cancel every workflow execution still in progress. Removing their queued jobs alone left them
+    // WAITING forever, and re-enabling the project must not resume them either. Jobs still queued for
+    // them stay in Redis and do nothing when they fire, since the engine never moves a cancelled execution on.
+    const cancelledExecutions = await prisma.workflowExecution.updateMany({
+      where: {
+        workflow: {projectId},
+        status: {in: [WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.WAITING]},
+      },
+      data: {
+        status: WorkflowExecutionStatus.CANCELLED,
+        completedAt: new Date(),
+        exitReason: 'Project disabled',
+      },
+    });
 
-      if (execution?.workflow.projectId === projectId) {
-        await job.remove();
-        signale.info(`[QUEUE] Removed workflow step job ${job.id}`);
-      }
+    if (cancelledExecutions.count > 0) {
+      signale.info(`[QUEUE] Cancelled ${cancelledExecutions.count} workflow executions for project ${projectId}`);
     }
 
     // Mark every still-PENDING email for this project as FAILED. We just stripped

@@ -1,82 +1,42 @@
-import React, {ReactNode} from 'react';
 import {AlertTriangle, CheckCircle2, Info, Lightbulb} from 'lucide-react';
+import React, {ReactNode} from 'react';
 
 type InfoBoxType = 'info' | 'warning' | 'tip' | 'success';
 
-interface InfoBoxProps {
+/**
+ * A callout in a guide: one pale tile, an icon, a short heading and a line or
+ * two. All four kinds share the tile; only the icon changes colour, and only
+ * for `warning` and `success`, which describe a state. Tinted panels with
+ * coloured borders made every guide look like a page of alerts.
+ *
+ * Use one or two per guide, for the thing a reader must not miss. More than
+ * that and none of them stand out.
+ */
+const kinds: Record<InfoBoxType, {icon: React.ElementType; color: string; label: string}> = {
+  info: {icon: Info, color: 'text-neutral-500', label: 'Note'},
+  tip: {icon: Lightbulb, color: 'text-neutral-500', label: 'Tip'},
+  warning: {icon: AlertTriangle, color: 'text-warn', label: 'Watch out'},
+  success: {icon: CheckCircle2, color: 'text-ok', label: 'Good to know'},
+};
+
+export function InfoBox({
+  type = 'info',
+  title,
+  children,
+}: {
   type?: InfoBoxType;
   title?: string;
   children: ReactNode;
-  className?: string;
-}
-
-const infoBoxConfig: Record<
-  InfoBoxType,
-  {
-    icon: React.ComponentType<{className?: string}>;
-    borderColor: string;
-    bgColor: string;
-    iconColor: string;
-    titleColor: string;
-  }
-> = {
-  info: {
-    icon: Info,
-    borderColor: 'border-blue-200',
-    bgColor: 'bg-blue-50',
-    iconColor: 'text-blue-600',
-    titleColor: 'text-blue-900',
-  },
-  warning: {
-    icon: AlertTriangle,
-    borderColor: 'border-amber-200',
-    bgColor: 'bg-amber-50',
-    iconColor: 'text-amber-600',
-    titleColor: 'text-amber-900',
-  },
-  tip: {
-    icon: Lightbulb,
-    borderColor: 'border-purple-200',
-    bgColor: 'bg-purple-50',
-    iconColor: 'text-purple-600',
-    titleColor: 'text-purple-900',
-  },
-  success: {
-    icon: CheckCircle2,
-    borderColor: 'border-green-200',
-    bgColor: 'bg-green-50',
-    iconColor: 'text-green-600',
-    titleColor: 'text-green-900',
-  },
-};
-
-/**
- * InfoBox component for displaying tips, warnings, notes, and other callouts in guides
- */
-export function InfoBox({type = 'info', title, children, className}: InfoBoxProps) {
-  const config = infoBoxConfig[type];
-  const Icon = config.icon;
-
-  const defaultTitles: Record<InfoBoxType, string> = {
-    info: 'Note',
-    warning: 'Warning',
-    tip: 'Tip',
-    success: 'Success',
-  };
+}) {
+  const {icon: Icon, color, label} = kinds[type];
 
   return (
-    <div className={`rounded-xl border ${config.borderColor} ${config.bgColor} p-6 my-6 ${className || ''}`}>
-      <div className={'flex gap-4'}>
-        <div className={'shrink-0'}>
-          <Icon className={`h-5 w-5 ${config.iconColor}`} />
-        </div>
-        <div>
-          {(title || defaultTitles[type]) && (
-            <h4 className={`not-prose font-semibold ${config.titleColor}`}>{title || defaultTitles[type]}</h4>
-          )}
-          <div className={'text-sm text-neutral-700 leading-relaxed mt-0 prose prose-sm max-w-none'}>{children}</div>
-        </div>
+    <aside className={'!my-8 flex gap-4 rounded-card bg-tile p-6'}>
+      <Icon aria-hidden className={`mt-0.5 h-5 w-5 flex-shrink-0 ${color}`} strokeWidth={2} />
+      <div className={'min-w-0'}>
+        <p className={'font-semibold !text-neutral-900'}>{title ?? label}</p>
+        <div className={'mt-1 text-neutral-700 [&>p+p]:mt-3 [&_p]:!leading-relaxed'}>{children}</div>
       </div>
-    </div>
+    </aside>
   );
 }

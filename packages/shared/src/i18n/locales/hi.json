@@ -2,26 +2,26 @@
     "pages": {
       "unsubscribe": {
         "title": "अनवस्थापित करें",
-        "description": "हम आपको छोड़ने के लिए खेद है। क्या आप यकीन है कि आप {email} से ईमेल प्राप्त करना चाहते हैं?",
+        "description": "क्या आप {email} पर {projectName} से ईमेल पाना बंद करना चाहते हैं?",
         "button": "अनवस्थापित करें",
         "buttonLoading": "अनवस्थापित कर रहा है...",
         "managePreferences": "प्राथमिकताओं को बदलें",
         "successTitle": "आप अनवस्थापित हैं",
-        "successDescription": "{email} अनवस्थापित हो गया है। आपको हमारे से और कोई ईमेल नहीं मिलेगा।",
+        "successDescription": "{email} पर अब {projectName} से कोई ईमेल नहीं आएगा।",
         "changedMind": "आपके मन में क्या परिवर्तन है?",
         "subscribeAgain": "पुनः सदस्यता लें"
       },
       "subscribe": {
         "title": "सदस्यता लें",
-        "description": "क्या आप यकीन है कि आप {email} से ईमेल प्राप्त करना चाहते हैं?",
+        "description": "क्या आप {email} पर {projectName} से ईमेल पाना चाहते हैं?",
         "button": "सदस्यता लें",
         "buttonLoading": "सदस्यता ले रहा है...",
         "successTitle": "आप सदस्यता ले गए हैं!",
-        "successDescription": "{email} अब हमारे से ईमेल प्राप्त करने के लिए सदस्यता ले गया है।"
+        "successDescription": "{email} पर अब {projectName} से ईमेल आएँगे।"
       },
       "manage": {
         "title": "प्राथमिकताओं को बदलें",
-        "description": "ईमेल प्राथमिकताओं को बदलें {email}",
+        "description": "{projectName} द्वारा {email} पर भेजे जाने वाले ईमेल प्रबंधित करें।",
         "subscriptionLabel": "ईमेल सदस्यता",
         "subscribedStatus": "आप अभी ईमेल प्राप्त करने के लिए सदस्यता ले गए हैं",
         "unsubscribedStatus": "आप अभी ईमेल से अनवस्थापित हैं",
@@ -31,9 +31,26 @@
         "subscribeToEmails": "ईमेल सदस्यता लें",
         "disclaimer": "यह पृष्ठ आपको ईमेल प्राथमिकताओं को बदलने देता है। आपकी सदस्यता स्थिति अभी ही अपडेट हो जाती है।"
       },
+      "snooze": {
+        "cta": "इसके बजाय रोकें",
+        "prompt": "हम आपके ईमेल कब तक रोकें?",
+        "duration_2_weeks": "2 सप्ताह",
+        "duration_1_month": "1 महीना",
+        "duration_6_months": "6 महीने",
+        "duration_1_year": "1 वर्ष",
+        "buttonLoading": "रोका जा रहा है...",
+        "cancel": "रद्द करें",
+        "successTitle": "आपके ईमेल रोक दिए गए हैं",
+        "successDescription": "{date} तक {email} पर {projectName} से कोई ईमेल नहीं आएगा। उसके बाद ईमेल अपने आप फिर शुरू हो जाएँगे।",
+        "status": "{date} तक रोका गया",
+        "resume": "अभी फिर से शुरू करें"
+      },
       "common": {
         "loading": "लोड हो रहा है...",
-        "error": "त्रुटि"
+        "error": "त्रुटि",
+        "loadFailed": "हम आपकी ईमेल प्राथमिकताएँ लोड नहीं कर सके। लिंक जाँचें और फिर से प्रयास करें।",
+        "actionFailed": "कुछ गलत हो गया। कृपया फिर से प्रयास करें।",
+        "sentWith": "{provider} के ज़रिए भेजा गया"
       }
     },
     "email": {

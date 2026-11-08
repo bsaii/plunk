@@ -2,26 +2,26 @@
   "pages": {
     "unsubscribe": {
       "title": "Abmelden",
-      "description": "Es tut uns leid, dass Sie gehen. Sind Sie sicher, dass Sie {email} vom Empfang von E-Mails abmelden möchten?",
+      "description": "Möchten Sie unter {email} keine E-Mails mehr von {projectName} erhalten?",
       "button": "Abmelden",
       "buttonLoading": "Abmeldung wird bearbeitet...",
       "managePreferences": "Einstellungen verwalten",
       "successTitle": "Sie sind abgemeldet",
-      "successDescription": "{email} wurde abgemeldet. Sie werden keine E-Mails mehr von uns erhalten.",
+      "successDescription": "{email} erhält keine E-Mails mehr von {projectName}.",
       "changedMind": "Haben Sie Ihre Meinung geändert?",
       "subscribeAgain": "Erneut abonnieren"
     },
     "subscribe": {
       "title": "Updates abonnieren",
-      "description": "Möchten Sie {email} abonnieren, um E-Mails zu erhalten?",
+      "description": "Möchten Sie unter {email} E-Mails von {projectName} erhalten?",
       "button": "Abonnieren",
       "buttonLoading": "Abonnement wird bearbeitet...",
       "successTitle": "Sie sind abonniert!",
-      "successDescription": "{email} ist jetzt abonniert, um unsere E-Mails zu erhalten."
+      "successDescription": "{email} erhält jetzt E-Mails von {projectName}."
     },
     "manage": {
       "title": "Einstellungen verwalten",
-      "description": "E-Mail-Einstellungen für {email} verwalten",
+      "description": "Verwalten Sie die E-Mails, die {projectName} an {email} sendet.",
       "subscriptionLabel": "E-Mail-Abonnement",
       "subscribedStatus": "Sie sind derzeit abonniert",
       "unsubscribedStatus": "Sie sind derzeit nicht abonniert",
@@ -31,9 +31,26 @@
       "subscribeToEmails": "E-Mails abonnieren",
       "disclaimer": "Auf dieser Seite können Sie Ihre E-Mail-Einstellungen verwalten. Ihr Abonnementstatus wird in Echtzeit aktualisiert."
     },
+    "snooze": {
+      "cta": "Stattdessen pausieren",
+      "prompt": "Wie lange sollen wir Ihre E-Mails pausieren?",
+      "duration_2_weeks": "2 Wochen",
+      "duration_1_month": "1 Monat",
+      "duration_6_months": "6 Monate",
+      "duration_1_year": "1 Jahr",
+      "buttonLoading": "Wird pausiert...",
+      "cancel": "Abbrechen",
+      "successTitle": "Ihre E-Mails sind pausiert",
+      "successDescription": "{email} erhält bis zum {date} keine E-Mails von {projectName}. Danach geht es automatisch weiter.",
+      "status": "Pausiert bis {date}",
+      "resume": "Jetzt fortsetzen"
+    },
     "common": {
       "loading": "Wird geladen...",
-      "error": "Fehler"
+      "error": "Fehler",
+      "loadFailed": "Ihre E-Mail-Einstellungen konnten nicht geladen werden. Bitte prüfen Sie den Link und versuchen Sie es erneut.",
+      "actionFailed": "Etwas ist schiefgelaufen. Bitte versuchen Sie es erneut.",
+      "sentWith": "Versendet mit {provider}"
     }
   },
   "email": {

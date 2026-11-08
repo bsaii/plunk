@@ -42,5 +42,10 @@ export async function processWorkflowJob(data: WorkflowStepJobData): Promise<voi
     await WorkflowExecutionService.processTimeout(executionId, stepId, stepExecutionId);
     return;
   }
+  if (type === 'delay-end') {
+    // Complete an execution whose DELAY step was the last step
+    await WorkflowExecutionService.processDelayEnd(executionId, stepId);
+    return;
+  }
   await WorkflowExecutionService.processStepExecution(executionId, stepId);
 }

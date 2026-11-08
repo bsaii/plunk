@@ -14,11 +14,15 @@ export enum ActivityType {
   EMAIL_CLICKED = 'email.clicked',
   EMAIL_BOUNCED = 'email.bounced',
   EMAIL_COMPLAINT = 'email.complaint',
+  CONTACT_SUBSCRIBED = 'contact.subscribed',
+  CONTACT_UNSUBSCRIBED = 'contact.unsubscribed',
   CAMPAIGN_SENT = 'campaign.sent',
   CAMPAIGN_SCHEDULED = 'campaign.scheduled',
   WORKFLOW_STARTED = 'workflow.started',
   WORKFLOW_COMPLETED = 'workflow.completed',
   WORKFLOW_EMAIL_SCHEDULED = 'workflow.email.scheduled',
+  // Not `email.*`: ActivityService reads that prefix as "history from email rows"
+  TRANSACTIONAL_SCHEDULED = 'transactional.scheduled',
 }
 
 /**

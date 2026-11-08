@@ -1,19 +1,17 @@
-import type {Contact, Email, Prisma, Project} from '@plunk/db';
+import type {Contact, Email, Project} from '@plunk/db';
 import {EmailSourceType, EmailStatus, TrackingMode} from '@plunk/db';
 import {toPrismaJson} from '@plunk/types';
 import signale from 'signale';
 
 import {DASHBOARD_URI, LANDING_URI, STRIPE_ENABLED} from '../app/constants.js';
 import {prisma} from '../database/prisma.js';
-import {HttpException} from '../exceptions/index.js';
+import {ConflictError, ErrorCode, HttpException, NotFound} from '../exceptions/index.js';
 import {createTranslatorSync, renderTemplate} from '@plunk/shared';
 
 import {BillingLimitService} from './BillingLimitService.js';
-import {DomainService} from './DomainService.js';
-import {bodyHasListManagementLink, buildEmailHeaders, classifyEmail} from './EmailHeaderService.js';
-import {EventService} from './EventService.js';
+import {withSourceEmail} from './EmailHeaderService.js';
 import {QueueService} from './QueueService.js';
-import {sendRawEmail} from './SESService.js';
+import {ThrottleService} from './ThrottleService.js';
 
 interface Attachment {
   filename: string;
@@ -40,11 +38,13 @@ interface SendEmailParams {
   workflowStepExecutionId?: string;
   recipientEmail?: string; // Optional custom recipient email (overrides contact.email)
   isTransactional?: boolean; // Override source type to TRANSACTIONAL (e.g. for transactional campaigns)
+  scheduledFor?: Date; // Transactional only: hold the email until then (`delivery.at`)
 }
 
 /**
  * Email Service
- * Handles sending emails and tracking delivery
+ * Builds and queues outbound email. The send itself is jobs/email-processor.ts, and the SES
+ * events that follow it are handled by controllers/Webhooks.ts.
  */
 export class EmailService {
   /**
@@ -101,17 +101,96 @@ export class EmailService {
         attachments: params.attachments ? toPrismaJson(params.attachments) : undefined,
         sourceType: EmailSourceType.TRANSACTIONAL,
         templateId: params.templateId,
-        status: EmailStatus.PENDING,
+        status: params.scheduledFor ? EmailStatus.SCHEDULED : EmailStatus.PENDING,
+        scheduledFor: params.scheduledFor,
       },
     });
 
-    // Increment usage counter in cache
+    // Increment usage counter in cache. A scheduled email counts in the month it was accepted,
+    // the same month the billing limit was checked against.
     await BillingLimitService.incrementUsage(params.projectId, EmailSourceType.TRANSACTIONAL);
 
-    // Queue email for sending
-    await this.queueEmail(email.id, EmailSourceType.TRANSACTIONAL);
+    // Queue email for sending; a scheduled one waits in the queue until its time
+    const delay = params.scheduledFor ? Math.max(0, params.scheduledFor.getTime() - Date.now()) : undefined;
+    await this.queueEmail(email.id, EmailSourceType.TRANSACTIONAL, delay);
 
     return email;
+  }
+
+  /**
+   * One email of the project, as the email resource endpoints return it
+   */
+  public static async getEmail(projectId: string, emailId: string) {
+    const email = await prisma.email.findFirst({
+      where: {id: emailId, projectId},
+      select: {
+        id: true,
+        status: true,
+        sourceType: true,
+        subject: true,
+        scheduledFor: true,
+        sentAt: true,
+        createdAt: true,
+        contact: {select: {id: true, email: true}},
+      },
+    });
+
+    if (!email) {
+      throw new NotFound('Email', emailId);
+    }
+
+    return email;
+  }
+
+  /**
+   * Move a scheduled transactional email to a new time. Only an email still SCHEDULED can
+   * move; the update decides, so it cannot race the email being sent.
+   */
+  public static async reschedule(projectId: string, emailId: string, scheduledFor: Date) {
+    const moved = await prisma.email.updateMany({
+      where: {id: emailId, projectId, status: EmailStatus.SCHEDULED, sourceType: EmailSourceType.TRANSACTIONAL},
+      data: {scheduledFor},
+    });
+
+    if (moved.count === 0) {
+      await this.assertScheduled(projectId, emailId);
+    }
+
+    await QueueService.rescheduleEmail(emailId, Math.max(0, scheduledFor.getTime() - Date.now()));
+    await ThrottleService.shift(emailId, scheduledFor);
+
+    return this.getEmail(projectId, emailId);
+  }
+
+  /**
+   * Cancel a scheduled transactional email. It is kept as CANCELLED, not billed, and the
+   * notification it held under `delivery.throttle` may be sent again straight away.
+   */
+  public static async cancelScheduled(projectId: string, emailId: string) {
+    const cancelled = await prisma.email.updateMany({
+      where: {id: emailId, projectId, status: EmailStatus.SCHEDULED, sourceType: EmailSourceType.TRANSACTIONAL},
+      data: {status: EmailStatus.CANCELLED},
+    });
+
+    if (cancelled.count === 0) {
+      await this.assertScheduled(projectId, emailId);
+    }
+
+    await QueueService.removeEmailJob(emailId);
+    await ThrottleService.releaseForEmail(emailId);
+
+    return this.getEmail(projectId, emailId);
+  }
+
+  /** Explain why an email could not be rescheduled or cancelled: missing, or no longer scheduled */
+  private static async assertScheduled(projectId: string, emailId: string): Promise<never> {
+    const email = await this.getEmail(projectId, emailId);
+
+    throw new ConflictError(
+      `Only scheduled transactional emails can be changed; this one is ${email.status.toLowerCase()}`,
+      {status: email.status},
+      ErrorCode.EMAIL_NOT_SCHEDULED,
+    );
   }
 
   /**
@@ -285,365 +364,12 @@ export class EmailService {
   }
 
   /**
-   * Actually send the email via AWS SES
-   * This is called by the email processor worker
-   */
-  public static async sendEmail(emailId: string): Promise<void> {
-    const email = await prisma.email.findUnique({
-      where: {id: emailId},
-      include: {
-        contact: true,
-        project: true,
-        template: {select: {type: true}},
-        campaign: {select: {type: true}},
-      },
-    });
-
-    if (!email) {
-      throw new HttpException(404, 'Email not found');
-    }
-
-    if (email.status !== EmailStatus.PENDING) {
-      return; // Already processed
-    }
-
-    // Final validation: Check subscription status before sending
-    // Only transactional emails should be sent to unsubscribed contacts
-    if (!email.contact.subscribed) {
-      const isTransactional =
-        email.sourceType === EmailSourceType.TRANSACTIONAL || email.template?.type === 'TRANSACTIONAL';
-
-      if (!isTransactional) {
-        signale.warn(`[EMAIL] Skipping marketing email ${emailId} to unsubscribed contact ${email.contact.email}`);
-        await prisma.email.update({
-          where: {id: emailId},
-          data: {
-            status: EmailStatus.FAILED,
-            error: 'Contact is unsubscribed from marketing emails',
-          },
-        });
-        return;
-      }
-    }
-
-    try {
-      // Verify domain is registered and verified before sending
-      // This ensures all emails (transactional, campaign, workflow) use verified domains
-      await DomainService.verifyEmailDomain(email.from, email.projectId);
-
-      // Update status to sending
-      await prisma.email.update({
-        where: {id: emailId},
-        data: {status: EmailStatus.SENDING},
-      });
-
-      // Format template variables in subject and body
-      const contactData =
-        email.contact.data && typeof email.contact.data === 'object' && !Array.isArray(email.contact.data)
-          ? email.contact.data
-          : {};
-      const formattedEmail = this.format({
-        subject: email.subject,
-        body: email.body,
-        data: {
-          id: email.contact.id,
-          email: email.contact.email,
-          ...contactData,
-          data: contactData,
-          unsubscribeUrl: `${DASHBOARD_URI}/unsubscribe/${email.contact.id}`,
-          subscribeUrl: `${DASHBOARD_URI}/subscribe/${email.contact.id}`,
-          manageUrl: `${DASHBOARD_URI}/manage/${email.contact.id}`,
-        },
-      });
-
-      // Classify the email once: it decides both the unsubscribe footer and the
-      // standards-based headers below.
-      const emailClass = classifyEmail({
-        sourceType: email.sourceType,
-        templateType: email.template?.type,
-        campaignType: email.campaign?.type,
-      });
-
-      // Compile HTML with unsubscribe footer and badge.
-      // Only marketing emails get the Plunk unsubscribe footer.
-      const compiledHtml = this.compile({
-        content: formattedEmail.body,
-        contact: email.contact,
-        project: email.project,
-        includeUnsubscribe: emailClass === 'marketing',
-      });
-
-      // Use explicit fromName if provided, otherwise fall back to project name
-      const fromName = email.fromName || email.project.name;
-      const fromEmail = email.from;
-
-      // Parse custom headers from JSON
-      const customHeaders =
-        email.headers && typeof email.headers === 'object' && !Array.isArray(email.headers)
-          ? (email.headers as Record<string, string>)
-          : undefined;
-
-      // Check for custom recipient override in headers
-      const recipientEmail = customHeaders?.['X-Plunk-Recipient-Override'] || email.contact.email;
-
-      // Remove internal headers before sending
-      const publicHeaders = customHeaders ? {...customHeaders} : undefined;
-      if (publicHeaders && 'X-Plunk-Recipient-Override' in publicHeaders) {
-        delete publicHeaders['X-Plunk-Recipient-Override'];
-      }
-
-      // Build the outbound headers: standards-based defaults for the email class
-      // plus any caller-supplied headers (which override the defaults).
-      const outboundHeaders = buildEmailHeaders({
-        emailClass,
-        isCampaign: email.campaignId != null,
-        hasListManagementLink: bodyHasListManagementLink(compiledHtml, email.contact.id),
-        unsubscribeId: email.contact.id,
-        customHeaders: publicHeaders,
-      });
-
-      // Parse attachments from JSON
-      const attachments =
-        email.attachments && Array.isArray(email.attachments)
-          ? (email.attachments as Array<{
-              filename: string;
-              content: string;
-              contentType: string;
-              contentId?: string;
-              disposition?: 'attachment' | 'inline';
-            }>)
-          : undefined;
-
-      // Determine tracking based on project settings and email type
-      const shouldTrack = this.shouldTrackEmail(email.project.tracking, email.sourceType);
-
-      // Send via AWS SES
-      const result = await sendRawEmail({
-        from: {
-          name: fromName,
-          email: fromEmail,
-        },
-        to: [recipientEmail],
-        content: {
-          subject: formattedEmail.subject,
-          html: compiledHtml,
-        },
-        reply: email.replyTo || undefined,
-        headers: outboundHeaders,
-        attachments: attachments,
-        tracking: shouldTrack,
-      });
-
-      // Mark as sent with SES message ID
-      await prisma.email.update({
-        where: {id: emailId},
-        data: {
-          status: EmailStatus.SENT,
-          sentAt: new Date(),
-          messageId: result.messageId,
-        },
-      });
-
-      // Track event (this will trigger workflows)
-      await EventService.trackEvent(email.projectId, 'email.sent', email.contactId, email.id, {
-        subject: formattedEmail.subject,
-        from: email.from,
-        fromName: email.fromName,
-        messageId: result.messageId,
-        templateId: email.templateId,
-        campaignId: email.campaignId,
-        sourceType: email.sourceType,
-        sentAt: new Date().toISOString(),
-      });
-    } catch (error) {
-      signale.error(`[EMAIL] Failed to send email ${emailId}:`, error);
-
-      // Mark as failed
-      await prisma.email.update({
-        where: {id: emailId},
-        data: {
-          status: EmailStatus.FAILED,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        },
-      });
-
-      throw error;
-    }
-  }
-
-  /**
-   * Process email webhook events (opens, clicks, bounces, etc.)
-   * This would be called by webhook endpoints from your email provider
-   */
-  public static async handleWebhookEvent(
-    emailId: string,
-    eventType: 'opened' | 'clicked' | 'bounced' | 'complained' | 'delivered',
-    metadata?: Record<string, unknown>,
-  ): Promise<void> {
-    const email = await prisma.email.findUnique({
-      where: {id: emailId},
-    });
-
-    if (!email) {
-      throw new HttpException(404, 'Email not found');
-    }
-
-    const now = new Date();
-    const updateData: Prisma.EmailUpdateInput = {};
-
-    switch (eventType) {
-      case 'delivered':
-        updateData.status = EmailStatus.DELIVERED;
-        updateData.deliveredAt = now;
-        break;
-
-      case 'opened':
-        if (!email.openedAt) {
-          updateData.openedAt = now;
-        }
-        updateData.opens = (email.opens || 0) + 1;
-        updateData.status = EmailStatus.OPENED;
-        break;
-
-      case 'clicked':
-        if (!email.clickedAt) {
-          updateData.clickedAt = now;
-        }
-        updateData.clicks = (email.clicks || 0) + 1;
-        updateData.status = EmailStatus.CLICKED;
-        break;
-
-      case 'bounced':
-        updateData.status = EmailStatus.BOUNCED;
-        updateData.bouncedAt = now;
-        // Unsubscribe contact on bounce and track event
-        if (email.contactId) {
-          await prisma.contact.update({
-            where: {id: email.contactId},
-            data: {subscribed: false},
-          });
-          // Track unsubscription event
-          await EventService.trackEvent(email.projectId, 'contact.unsubscribed', email.contactId, email.id, {
-            reason: 'bounce',
-          });
-        }
-        break;
-
-      case 'complained':
-        updateData.status = EmailStatus.COMPLAINED;
-        updateData.complainedAt = now;
-        // Unsubscribe contact and track event
-        if (email.contactId) {
-          await prisma.contact.update({
-            where: {id: email.contactId},
-            data: {subscribed: false},
-          });
-          // Track unsubscription event
-          await EventService.trackEvent(email.projectId, 'contact.unsubscribed', email.contactId, email.id, {
-            reason: 'complaint',
-          });
-        }
-        break;
-    }
-
-    await prisma.email.update({
-      where: {id: emailId},
-      data: updateData,
-    });
-
-    // Update campaign stats if applicable
-    if (email.campaignId) {
-      const campaignUpdate: Prisma.CampaignUpdateInput = {};
-
-      switch (eventType) {
-        case 'delivered':
-          campaignUpdate.deliveredCount = {increment: 1};
-          break;
-
-        case 'opened':
-          // Only increment unique opens to match getStats logic
-          if (!email.openedAt) {
-            campaignUpdate.openedCount = {increment: 1};
-          }
-          break;
-
-        case 'clicked':
-          // Only increment unique clicks to match getStats logic
-          if (!email.clickedAt) {
-            campaignUpdate.clickedCount = {increment: 1};
-          }
-          break;
-
-        case 'bounced':
-          campaignUpdate.bouncedCount = {increment: 1};
-          break;
-      }
-
-      if (Object.keys(campaignUpdate).length > 0) {
-        await prisma.campaign.update({
-          where: {id: email.campaignId},
-          data: campaignUpdate,
-        });
-      }
-    }
-
-    // Track event
-    await prisma.event.create({
-      data: {
-        projectId: email.projectId,
-        contactId: email.contactId,
-        emailId: email.id,
-        name: `email.${eventType}`,
-        data: metadata ? toPrismaJson(metadata) : undefined,
-      },
-    });
-  }
-
-  /**
-   * Get email statistics for a project
-   */
-  public static async getStats(projectId: string, startDate?: Date, endDate?: Date) {
-    const where: Prisma.EmailWhereInput = {
-      projectId,
-      ...(startDate || endDate
-        ? {
-            createdAt: {
-              ...(startDate ? {gte: startDate} : {}),
-              ...(endDate ? {lte: endDate} : {}),
-            },
-          }
-        : {}),
-    };
-
-    const [total, sent, delivered, received, opened, clicked, bounced, failed] = await Promise.all([
-      prisma.email.count({where}),
-      prisma.email.count({where: {...where, status: EmailStatus.SENT}}),
-      prisma.email.count({where: {...where, status: EmailStatus.DELIVERED}}),
-      prisma.email.count({where: {...where, status: EmailStatus.RECEIVED}}),
-      prisma.email.count({where: {...where, status: EmailStatus.OPENED}}),
-      prisma.email.count({where: {...where, status: EmailStatus.CLICKED}}),
-      prisma.email.count({where: {...where, status: EmailStatus.BOUNCED}}),
-      prisma.email.count({where: {...where, status: EmailStatus.FAILED}}),
-    ]);
-
-    return {
-      total,
-      sent,
-      delivered,
-      received,
-      opened,
-      clicked,
-      bounced,
-      failed,
-      openRate: sent > 0 ? (opened / sent) * 100 : 0,
-      clickRate: sent > 0 ? (clicked / sent) * 100 : 0,
-      bounceRate: sent > 0 ? (bounced / sent) * 100 : 0,
-    };
-  }
-
-  /**
-   * Format email template by replacing variables in subject and body
-   * Uses shared template rendering from @plunk/shared
+   * Render a single email's subject and body.
+   *
+   * Uses the shared Liquid renderer from @plunk/shared, which caches parsed templates,
+   * so the per-email call sites here don't re-parse the same body for every recipient.
+   * When rendering a known template for many contacts in one pass, prefer
+   * `compileTemplate` to hoist the parse out of the loop entirely (see CampaignService).
    */
   public static format({subject, body, data}: {subject: string; body: string; data: Record<string, unknown>}): {
     subject: string;
@@ -1057,11 +783,17 @@ export class EmailService {
     contact,
     project,
     includeUnsubscribe = true,
+    sourceEmailId,
   }: {
     content: string;
     contact: Contact;
     project: Project;
     includeUnsubscribe?: boolean;
+    /**
+     * Id of the email this footer is being rendered into, so an opt-out from the
+     * footer link can be attributed to it. See {@link withSourceEmail}.
+     */
+    sourceEmailId?: string;
   }): string {
     // Wrap visual editor content with prose styles so the sent email matches the preview modal.
     // Custom HTML (from the HTML editor) already carries its own styles and is used as-is.
@@ -1093,7 +825,7 @@ export class EmailService {
                 <hr style="border: none; border-top: 1px solid #eaeaea; width: 100%; margin-top: 12px; margin-bottom: 12px;">
                 <p style="font-size: 12px; line-height: 24px; margin: 16px 0; text-align: center; color: rgb(64, 64, 64);">
                   ${unsubscribeText}
-                  <a href="${DASHBOARD_URI}/unsubscribe/${contact.id}">${updatePreferencesText}</a>.
+                  <a href="${withSourceEmail(`${DASHBOARD_URI}/unsubscribe/${contact.id}`, sourceEmailId)}">${updatePreferencesText}</a>.
                 </p>
               </td>
             </tr>

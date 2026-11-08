@@ -1,0 +1,184 @@
+/**
+ * Helpers shared by every tool module: result shaping, error handling, and the
+ * confirmation gate used before irreversible sends.
+ */
+
+import {acceptedContent, inputRequired} from '@modelcontextprotocol/server';
+import type {
+  CallToolResult,
+  InputRequiredResult,
+  McpServer,
+  StandardSchemaWithJSON,
+  ToolAnnotations,
+  ToolCallback,
+} from '@modelcontextprotocol/server';
+import * as z from 'zod';
+
+import {PlunkApiError} from '../client.js';
+import {activeProject, type ProjectRouter} from '../projects.js';
+
+export type ToolResult = CallToolResult | InputRequiredResult;
+
+/** A tool result carrying both prose and the machine-readable payload. */
+export function jsonResult(summary: string, data: unknown): CallToolResult {
+  return {
+    content: [{type: 'text', text: `${summary}\n\n${JSON.stringify(data, null, 2)}`}],
+    structuredContent: data as CallToolResult['structuredContent'],
+  };
+}
+
+export function textResult(text: string): CallToolResult {
+  return {content: [{type: 'text', text}]};
+}
+
+/**
+ * A failed tool call. Returned as a result rather than thrown so the model can
+ * read it and correct itself, per the tools spec.
+ */
+export function errorResult(text: string): CallToolResult {
+  return {content: [{type: 'text', text}], isError: true};
+}
+
+/**
+ * Wraps a handler so API failures become readable tool errors instead of
+ * protocol errors. Anything unexpected is still surfaced, never swallowed.
+ */
+export async function runTool(fn: () => Promise<ToolResult>): Promise<ToolResult> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (error instanceof PlunkApiError) {
+      return errorResult(`Plunk API error (${error.status}${error.code ? ` ${error.code}` : ''}): ${error.message}`);
+    }
+
+    return errorResult(`Unexpected error calling Plunk: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * Requires a human to confirm before an irreversible action proceeds.
+ *
+ * This deliberately does not accept a `confirm` tool argument: the model could
+ * set that itself, which would make the gate meaningless. Confirmation comes
+ * back through the elicitation round-trip, so it originates with the user.
+ *
+ * Clients that cannot elicit therefore cannot send. That is the safe direction
+ * for mass email, and `PLUNK_ALLOW_UNCONFIRMED_SENDS=true` exists as a
+ * documented escape hatch for headless automation.
+ */
+export function requireConfirmation(
+  ctx: {mcpReq?: {inputResponses?: unknown}},
+  key: string,
+  message: string,
+): InputRequiredResult | undefined {
+  if (process.env.PLUNK_ALLOW_UNCONFIRMED_SENDS === 'true') {
+    return undefined;
+  }
+
+  const answer = acceptedContent<{confirm?: boolean}>(
+    ctx.mcpReq?.inputResponses as Parameters<typeof acceptedContent>[0],
+    key,
+  );
+
+  if (answer?.confirm === true) {
+    return undefined;
+  }
+
+  // With several projects configured, the prompt is the user's last chance to
+  // notice the agent picked the wrong one — so it always says which.
+  const project = activeProject()?.name;
+
+  return inputRequired({
+    inputRequests: {
+      [key]: inputRequired.elicit({
+        message: project ? `In project "${project}": ${message}` : message,
+        requestedSchema: {
+          type: 'object',
+          properties: {
+            confirm: {
+              type: 'boolean',
+              description: 'Confirm this send. It cannot be undone.',
+            },
+          },
+          required: ['confirm'],
+        },
+      }),
+    },
+  });
+}
+
+/** Registration context handed to each tool module. */
+export interface ToolContext {
+  server: McpServer;
+  readOnly: boolean;
+  projects: ProjectRouter;
+}
+
+/**
+ * Registers a tool, skipping mutating tools entirely when running read-only so
+ * they never appear in `tools/list`.
+ *
+ * When several projects are configured, every tool also takes a required
+ * `project` argument. It is stripped before the handler runs — some handlers
+ * forward their whole input as a request body — and the handler runs with that
+ * project's key active instead.
+ *
+ * Generic over the input schema so the handler keeps its inferred argument
+ * types — widening this to the SDK's deprecated raw-shape overload would erase
+ * them to `unknown` at every call site.
+ */
+export function register<InputArgs extends StandardSchemaWithJSON>(
+  {server, readOnly, projects}: ToolContext,
+  name: string,
+  config: {
+    title: string;
+    description: string;
+    inputSchema?: InputArgs;
+    annotations: ToolAnnotations;
+  },
+  handler: ToolCallback<InputArgs>,
+): void {
+  if (readOnly && config.annotations.readOnlyHint !== true) {
+    return;
+  }
+
+  const names = projects.names;
+
+  if (names.length === 0) {
+    server.registerTool(name, config, handler);
+    return;
+  }
+
+  // Every tool module declares its input as a plain `z.object`, which is what
+  // makes extending it safe here.
+  const baseSchema = (config.inputSchema as unknown as z.ZodObject | undefined) ?? z.object({});
+  const inputSchema = baseSchema.extend({
+    project: z
+      .enum(names as [string, ...string[]])
+      .describe(`Which Plunk project to act on: ${names.join(', ')}. Ask the user if it is unclear.`),
+  });
+
+  // A schema-less handler is called as `(extra)`; one with a schema as `(args, extra)`.
+  const call = handler as unknown as (...params: unknown[]) => Promise<ToolResult>;
+
+  server.registerTool(name, {...config, inputSchema}, ({project, ...args}, extra) =>
+    projects.run(project, () => (config.inputSchema ? call(args, extra) : call(extra))),
+  );
+}
+
+/** Truncation notice steering the agent to filter rather than page blindly. */
+export function paginationHint(hasMore: boolean, cursor: string | null | undefined): string {
+  if (!hasMore || !cursor) {
+    return '';
+  }
+
+  return (
+    `\n\nMore results exist. Prefer narrowing the search with a filter over paging through everything; ` +
+    `if you do need the next page, pass cursor="${cursor}".`
+  );
+}
+
+/** Next-page notice for the page-based lists (`page`/`pageSize` rather than a cursor). */
+export function pageHint(page: number, totalPages: number): string {
+  return page < totalPages ? `\n\nMore results exist. For the next page, pass page=${page + 1}.` : '';
+}

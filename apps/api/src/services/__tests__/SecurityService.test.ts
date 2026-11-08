@@ -45,7 +45,10 @@ describe('SecurityService', () => {
   /**
    * Helper to create N emails, some of which are bounced
    */
-  async function createEmails(count: number, opts?: {bouncedCount?: number; complainedCount?: number; createdAt?: Date}) {
+  async function createEmails(
+    count: number,
+    opts?: {bouncedCount?: number; complainedCount?: number; createdAt?: Date; simulated?: boolean},
+  ) {
     const bouncedCount = opts?.bouncedCount ?? 0;
     const complainedCount = opts?.complainedCount ?? 0;
     const createdAt = opts?.createdAt ?? new Date();
@@ -62,6 +65,7 @@ describe('SecurityService', () => {
       createdAt,
       bouncedAt: i < bouncedCount ? createdAt : null,
       complainedAt: i >= bouncedCount && i < bouncedCount + complainedCount ? createdAt : null,
+      simulated: opts?.simulated ?? false,
     }));
     await prisma.email.createMany({data});
   }
@@ -130,9 +134,9 @@ describe('SecurityService', () => {
     });
 
     it('should NOT trigger on high absolute complaint count when rate is healthy', async () => {
-      // 100,000 emails, 30 complaints = 0.03% (at warning floor, below critical 0.15%)
+      // 40,000 emails, 30 complaints = 0.075% (below critical: 0.15% 7-day, 0.12% all-time)
       // Old absolute ceiling (25 complaints in 7d critical) would have tripped.
-      await createEmails(100000, {complainedCount: 30});
+      await createEmails(40000, {complainedCount: 30});
 
       const status = await SecurityService.getSecurityStatus(projectId);
       expect(status.shouldDisable).toBe(false);
@@ -187,7 +191,7 @@ describe('SecurityService', () => {
       // New project, 20K emails with 30 bounces — exceeds new project 24h critical ceiling
       await createEmails(20000, {bouncedCount: 30});
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId);
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
 
       const project = await prisma.project.findUnique({
         where: {id: projectId},
@@ -205,13 +209,85 @@ describe('SecurityService', () => {
       });
       await createEmails(200, {bouncedCount: 12});
 
-      await SecurityService.checkAndEnforceSecurityLimits(projectId);
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
 
       const project = await prisma.project.findUnique({
         where: {id: projectId},
         select: {disabled: true},
       });
       expect(project?.disabled).toBe(false);
+    });
+  });
+
+  /**
+   * Enforcement runs on each new bounce or complaint, but only the metric that event moved
+   * may disable. A project re-enabled with an old critical all-time complaint rate was
+   * re-disabled by its next bounce, which cannot have raised the complaint rate.
+   */
+  describe('checkAndEnforceSecurityLimits gates on the triggering metric', () => {
+    beforeEach(async () => {
+      const oldDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+      await prisma.project.update({where: {id: projectId}, data: {createdAt: oldDate}});
+    });
+
+    async function isDisabled() {
+      const project = await prisma.project.findUnique({where: {id: projectId}, select: {disabled: true}});
+      return project?.disabled;
+    }
+
+    async function createReportedScenario() {
+      // Old enough to sit outside the 7-day window: only the all-time complaint rate trips.
+      const longAgo = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+      await createEmails(4003, {bouncedCount: 19, complainedCount: 6, createdAt: longAgo});
+    }
+
+    it('does not disable on a bounce when only the complaint rate is critical', async () => {
+      await createReportedScenario();
+
+      const status = await SecurityService.getSecurityStatus(projectId);
+      expect(status.shouldDisable).toBe(true);
+      expect(status.violations.some(v => v.includes('All-time complaint rate'))).toBe(true);
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+
+      expect(await isDisabled()).toBe(false);
+    });
+
+    it('disables on a complaint when the complaint rate is critical', async () => {
+      await createReportedScenario();
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'complaint');
+
+      expect(await isDisabled()).toBe(true);
+    });
+
+    it('disables on a bounce when the bounce rate is critical', async () => {
+      // Critical 7-day bounce rate
+      await createEmails(100, {bouncedCount: 11});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+
+      expect(await isDisabled()).toBe(true);
+    });
+
+    it('does not disable on a complaint when only the bounce rate is critical', async () => {
+      await createEmails(100, {bouncedCount: 11});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'complaint');
+
+      expect(await isDisabled()).toBe(false);
+    });
+
+    it('gates the new-project bounce ceiling on bounces too', async () => {
+      await prisma.project.update({where: {id: projectId}, data: {createdAt: new Date()}});
+      // Trips the 24-hour new-project bounce ceiling while the bounce rate stays healthy.
+      await createEmails(20000, {bouncedCount: 30});
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'complaint');
+      expect(await isDisabled()).toBe(false);
+
+      await SecurityService.checkAndEnforceSecurityLimits(projectId, 'bounce');
+      expect(await isDisabled()).toBe(true);
     });
   });
 
@@ -241,6 +317,68 @@ describe('SecurityService', () => {
 
       // New project flag should be hidden
       expect(metrics.status.isNewProject).toBe(false);
+
+      // Internal enforcement flags should not leak
+      expect(metrics.status).not.toHaveProperty('criticalByMetric');
+    });
+  });
+  describe('SES mailbox simulator', () => {
+    /**
+     * Mail to `@simulator.amazonses.com` never leaves AWS, and AWS excludes it from its own
+     * bounce and complaint rates. Plunk counted it, so rehearsing bounce handling against
+     * the simulator -- the thing AWS documents it for -- could warn or disable the project
+     * doing the rehearsing.
+     */
+    it('should exclude simulated bounces from the rates entirely', async () => {
+      await createEmails(100);
+      // 50 bounces out of 150 is 33%, far past the 10% critical threshold.
+      await createEmails(50, {bouncedCount: 50, simulated: true});
+
+      const status = await SecurityService.getSecurityStatus(projectId);
+
+      expect(status.sevenDay.bounces).toBe(0);
+      expect(status.sevenDay.bounceRate).toBe(0);
+      expect(status.isHealthy).toBe(true);
+      expect(status.shouldDisable).toBe(false);
+      expect(status.violations).toHaveLength(0);
+      expect(status.warnings).toHaveLength(0);
+    });
+
+    it('should exclude simulated complaints from the rates entirely', async () => {
+      await createEmails(100);
+      await createEmails(50, {complainedCount: 50, simulated: true});
+
+      const status = await SecurityService.getSecurityStatus(projectId);
+
+      expect(status.sevenDay.complaints).toBe(0);
+      expect(status.sevenDay.complaintRate).toBe(0);
+      expect(status.isHealthy).toBe(true);
+      expect(status.shouldDisable).toBe(false);
+    });
+
+    it('should leave simulated emails out of the denominator too', async () => {
+      // Dropping only the numerator would leave the test sends padding the denominator and
+      // understating the real bounce rate: 6 bounces in 100 real emails is a warning, but
+      // 6 in 600 reads as 1% and passes.
+      await createEmails(100, {bouncedCount: 6});
+      await createEmails(500, {simulated: true});
+
+      const status = await SecurityService.getSecurityStatus(projectId);
+
+      expect(status.sevenDay.total).toBe(100);
+      expect(status.sevenDay.bounceRate).toBeCloseTo(6, 5);
+      expect(status.warnings.length).toBeGreaterThan(0);
+    });
+
+    it('should still count real bounces alongside simulated ones', async () => {
+      await createEmails(100, {bouncedCount: 11});
+      await createEmails(50, {bouncedCount: 50, simulated: true});
+
+      const status = await SecurityService.getSecurityStatus(projectId);
+
+      expect(status.sevenDay.total).toBe(100);
+      expect(status.sevenDay.bounces).toBe(11);
+      expect(status.shouldDisable).toBe(true);
     });
   });
 });

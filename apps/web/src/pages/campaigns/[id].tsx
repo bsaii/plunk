@@ -27,11 +27,15 @@ import {
   SelectTrigger,
   SelectValue,
   IconSpinner,
+  Skeleton,
   StickySaveBar,
 } from '@plunk/ui';
 import type {Campaign, Segment} from '@plunk/db';
+import type {CampaignRecipientType} from '@plunk/types';
 import {CampaignAudienceType, CampaignStatus, TemplateType} from '@plunk/db';
 import {CampaignSchemas, detectUnsubscribeSignal} from '@plunk/shared';
+import {AnimatedNumber} from '../../components/AnimatedNumber';
+import {CampaignRecipientsSheet} from '../../components/CampaignRecipientsSheet';
 import {DashboardLayout} from '../../components/DashboardLayout';
 import {EmailSettings} from '../../components/EmailSettings';
 import {EmailEditor} from '../../components/EmailEditor';
@@ -39,17 +43,18 @@ import {network} from '../../lib/network';
 import {formatFullDateTime, formatUTCDateTime, getUserTimezone, schedulePresets} from '../../lib/dateUtils';
 import {useChangeTracking} from '../../lib/hooks/useChangeTracking';
 import {
+  AlertCircle,
+  Archive,
+  ArchiveRestore,
   ArrowLeft,
   Calendar,
   ChevronDown,
+  CircleStop,
   Info,
-  Mail,
-  MousePointer,
   Save,
   Send,
   TestTube,
   Trash2,
-  TrendingUp,
   TriangleAlert,
   Users,
   XCircle,
@@ -70,10 +75,80 @@ interface CampaignStats {
   openedCount: number;
   clickedCount: number;
   bouncedCount: number;
+  complainedCount: number;
+  unsubscribedCount: number;
   openRate: number;
   clickRate: number;
   bounceRate: number;
   deliveryRate: number;
+  complaintRate: number;
+  unsubscribeRate: number;
+}
+
+interface SupportingFigure {
+  label: string;
+  count: (s: CampaignStats) => number;
+  rate: (s: CampaignStats) => number;
+  /**
+   * Set where the contacts behind the figure are reachable by index, which makes the
+   * figure a button that opens them. Bounces, complaints and opt-outs are each stamped
+   * on the email row, so all three can be opened.
+   */
+  drillDown?: CampaignRecipientType;
+  /**
+   * Set on the figures where a number is bad news. They read grey at zero -- a healthy
+   * campaign should not draw the eye to three empty columns -- and turn red once they
+   * pass the rate SES enforcement acts on, but only after enough of them to mean
+   * something. `warnRate` and `minCount` mirror the 7-day warning levels in
+   * SecurityService's SECURITY_THRESHOLDS, so this panel and the deliverability
+   * warnings elsewhere in the app never disagree about what "too high" is.
+   */
+  adverse?: {warnRate: number; minCount: number};
+}
+
+/**
+ * The five figures supporting the headline, in funnel order. Opens are excluded because
+ * they are the headline, and "sent" because it is always 100% of itself and already
+ * stated in the card description.
+ *
+ * Every rate is measured against sentCount, the denominator the stats endpoint documents.
+ */
+const SUPPORTING_FIGURES: SupportingFigure[] = [
+  {label: 'Delivered', count: s => s.deliveredCount, rate: s => s.deliveryRate},
+  {label: 'Clicked', count: s => s.clickedCount, rate: s => s.clickRate},
+  {
+    label: 'Bounced',
+    count: s => s.bouncedCount,
+    rate: s => s.bounceRate,
+    adverse: {warnRate: 5, minCount: 5},
+    drillDown: 'bounced',
+  },
+  {
+    label: 'Spam reports',
+    count: s => s.complainedCount,
+    rate: s => s.complaintRate,
+    adverse: {warnRate: 0.075, minCount: 3},
+    drillDown: 'complained',
+  },
+  // No enforcement threshold applies to unsubscribes, so this one never turns red: it is
+  // a cost to read, not a fault to fix.
+  {
+    label: 'Unsubscribed',
+    count: s => s.unsubscribedCount,
+    rate: s => s.unsubscribeRate,
+    drillDown: 'unsubscribed',
+  },
+];
+
+function figureTone(figure: SupportingFigure, s: CampaignStats): string {
+  const count = figure.count(s);
+
+  if (figure.adverse) {
+    if (count === 0) return 'text-neutral-500';
+    if (count >= figure.adverse.minCount && figure.rate(s) >= figure.adverse.warnRate) return 'text-red-600';
+  }
+
+  return 'text-neutral-900';
 }
 
 export default function CampaignDetailsPage() {
@@ -81,13 +156,44 @@ export default function CampaignDetailsPage() {
   const {id} = router.query;
   const {activeProject} = useActiveProject();
 
+  // Set when a cancel comes back still CANCELLED but with its revert queued: the
+  // unsent emails are being cleared in the background and the campaign becomes a draft
+  // when that finishes. Polled rather than pushed, and given up on after a while --
+  // clearing a million rows outruns any sensible poll, and the page is correct either
+  // way once it is reloaded.
+  const [revertPending, setRevertPending] = useState(false);
+
   const {
     data: campaign,
     mutate,
     isLoading,
-  } = useSWR<{data: Campaign}>(id ? `/campaigns/${id}` : null, {revalidateOnFocus: false});
+  } = useSWR<{data: Campaign}>(id ? `/campaigns/${id}` : null, {
+    revalidateOnFocus: false,
+    refreshInterval: revertPending ? 5000 : 0,
+  });
 
-  const {data: stats} = useSWR<{data: CampaignStats}>(
+  // Stop polling the moment the cleanup promotes the campaign, and give up if it is
+  // taking longer than a poll is worth -- a very large cleanup finishes long after the
+  // user has moved on, and the next page load shows the truth regardless.
+  const revertedStatus = campaign?.data.status;
+  useEffect(() => {
+    if (!revertPending) return;
+
+    if (revertedStatus === CampaignStatus.DRAFT) {
+      setRevertPending(false);
+      toast.success('Campaign returned to draft');
+      return;
+    }
+
+    const giveUp = setTimeout(() => setRevertPending(false), 2 * 60 * 1000);
+    return () => clearTimeout(giveUp);
+  }, [revertPending, revertedStatus]);
+
+  const {
+    data: stats,
+    error: statsError,
+    mutate: mutateStats,
+  } = useSWR<{data: CampaignStats}>(
     id && campaign?.data.status !== CampaignStatus.DRAFT ? `/campaigns/${id}/stats` : null,
     {
       revalidateOnFocus: false,
@@ -121,26 +227,62 @@ export default function CampaignDetailsPage() {
 
   const [dialog, setDialog] = useState<CampaignDialog>({type: 'none'});
 
+  // Which drill-down list is open, or null for none.
+  const [recipientList, setRecipientList] = useState<CampaignRecipientType | null>(null);
+
   // Automatically initialize edit fields when campaign is loaded and is a draft
   const isEditMode = campaign?.data.status === CampaignStatus.DRAFT;
 
   const handleCancel = async () => {
     try {
-      await network.fetch('POST', `/campaigns/${id}/cancel`);
-      toast.success('Campaign cancelled successfully');
+      // Three outcomes, and the confirmation reports the one that happened rather than
+      // asserting a cancellation: straight back to draft, cancelled for good, or
+      // stopped with the revert still draining in the background.
+      const res = await network.fetch<{data: {status: CampaignStatus}; revertPending?: boolean}>(
+        'POST',
+        `/campaigns/${id}/cancel`,
+      );
+
+      if (res.revertPending) {
+        setRevertPending(true);
+        toast.success('Campaign stopped. Clearing its unsent emails, then it returns to draft.');
+      } else {
+        toast.success(
+          res.data.status === CampaignStatus.DRAFT ? 'Campaign stopped and returned to draft' : 'Campaign canceled',
+        );
+      }
+
       void mutate();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to cancel campaign');
+      toast.error(error instanceof Error ? error.message : 'Couldn’t cancel the campaign. Try again.');
     }
   };
 
   const handleDelete = async () => {
     try {
       await network.fetch('DELETE', `/campaigns/${id}`);
-      toast.success('Campaign deleted successfully');
+      toast.success('Campaign deleted');
       void router.push('/campaigns');
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to delete campaign');
+      toast.error(error instanceof Error ? error.message : 'Couldn’t delete the campaign. Try again.');
+    }
+  };
+
+  /**
+   * Archive or restore. No confirmation: archiving destroys nothing, and the detail page
+   * stays on the campaign afterwards so the state change is visible in the header badge.
+   */
+  const handleSetArchived = async (archived: boolean) => {
+    try {
+      await network.fetch('POST', `/campaigns/${id}/${archived ? 'archive' : 'unarchive'}`);
+      toast.success(archived ? 'Campaign archived' : 'Campaign restored');
+      void mutate();
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : `Couldn\u2019t ${archived ? 'archive' : 'restore'} the campaign. Try again.`,
+      );
     }
   };
 
@@ -150,7 +292,7 @@ export default function CampaignDetailsPage() {
       toast.success('Campaign is being sent!');
       void mutate();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to send campaign');
+      toast.error(error instanceof Error ? error.message : 'Couldn’t send the campaign. Try again.');
     }
   };
 
@@ -183,7 +325,7 @@ export default function CampaignDetailsPage() {
       setSelectedPreset(null);
       void mutate();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to schedule campaign');
+      toast.error(error instanceof Error ? error.message : 'Couldn’t schedule the campaign. Try again.');
     }
   };
 
@@ -204,7 +346,7 @@ export default function CampaignDetailsPage() {
       setDialog({type: 'none'});
       setTestEmailAddress('');
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to send test email');
+      toast.error(error instanceof Error ? error.message : 'Couldn’t send the test email. Try again.');
     } finally {
       setDialog(d => (d.type === 'testEmail' ? {type: 'testEmail', sending: false} : d));
     }
@@ -249,7 +391,7 @@ export default function CampaignDetailsPage() {
         });
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to update campaign');
+      toast.error(error instanceof Error ? error.message : 'Couldn’t save the campaign. Try again.');
     } finally {
       setIsSubmitting(false);
     }
@@ -337,6 +479,38 @@ export default function CampaignDetailsPage() {
 
   const c = campaign.data;
   const s = stats?.data;
+  // Safe to add: the three counts are mutually exclusive per recipient.
+  const lostContacts = s ? s.bouncedCount + s.complainedCount + s.unsubscribedCount : 0;
+
+  // A campaign can reach SENDING before its recipient count is known, so guard the divide,
+  // and clamp: sentCount is read partly from Redis and can briefly overshoot the total.
+  const sendProgress = s && s.totalRecipients > 0 ? Math.min((s.sentCount / s.totalRecipients) * 100, 100) : 0;
+  // A scheduled campaign has stats, but they are all zero until it starts sending.
+  const hasResults = c.status === CampaignStatus.SENDING || c.status === CampaignStatus.SENT;
+
+  // Cancelling has two very different outcomes, and the dialog has to name the one
+  // the user is about to get. A campaign with nothing sent comes back as an editable
+  // draft; once a single email is away the record is frozen for good. The sent count
+  // is a poll behind the send, so while a campaign is in flight this promises only
+  // what is certain -- already-delivered copies cannot be recalled.
+  const sentSoFar = s?.sentCount ?? 0;
+  const cancelCopy =
+    c.status === CampaignStatus.SCHEDULED || sentSoFar === 0
+      ? {
+          title: 'Stop this campaign?',
+          description:
+            c.status === CampaignStatus.SCHEDULED
+              ? 'Nothing has been sent yet, so the campaign returns to draft and stays editable.'
+              : 'Sending stops now. If nothing has gone out yet the campaign returns to draft; any contact who already received it keeps their copy.',
+          confirmText: 'Stop campaign',
+        }
+      : {
+          title: 'Cancel this campaign?',
+          description: `Sending stops now. The ${sentSoFar.toLocaleString()} ${
+            sentSoFar === 1 ? 'contact' : 'contacts'
+          } who already received it keep their copy, and the campaign is permanently cancelled.`,
+          confirmText: 'Cancel campaign',
+        };
 
   // Get recipient count for draft campaigns from the campaign's totalRecipients field
   // The backend calculates this for all audience types when the campaign is created/updated
@@ -360,7 +534,7 @@ export default function CampaignDetailsPage() {
                   <Badge variant="secondary">Draft</Badge>
                 </div>
                 <p className="text-neutral-500 mt-1 text-sm sm:text-base">
-                  Make changes to your campaign before sending
+                  Not sent yet. Edit freely.
                 </p>
               </div>
             </div>
@@ -390,7 +564,7 @@ export default function CampaignDetailsPage() {
                   className="flex-1 sm:flex-none"
                 >
                   <Save className="h-4 w-4" />
-                  <span className="hidden sm:inline">{isSubmitting ? 'Saving...' : 'Save'}</span>
+                  <span className="hidden sm:inline">{isSubmitting ? 'Saving…' : 'Save'}</span>
                   <span className="sm:hidden">Save</span>
                 </Button>
                 <DropdownMenu>
@@ -406,7 +580,7 @@ export default function CampaignDetailsPage() {
                       <div className="flex items-start gap-3">
                         <TestTube className="h-4 w-4 mt-0.5 text-neutral-700" />
                         <div className="flex flex-col gap-0.5 flex-1">
-                          <span className="font-medium text-sm">Send Test Email</span>
+                          <span className="font-medium text-sm">Send test email</span>
                           <span className="text-xs text-neutral-500 leading-snug">
                             Preview in your inbox before sending
                           </span>
@@ -417,7 +591,7 @@ export default function CampaignDetailsPage() {
                       <div className="flex items-start gap-3">
                         <Send className="h-4 w-4 mt-0.5 text-neutral-700" />
                         <div className="flex flex-col gap-0.5 flex-1">
-                          <span className="font-medium text-sm">Send Now</span>
+                          <span className="font-medium text-sm">Send now</span>
                           <span className="text-xs text-neutral-500 leading-snug">
                             Send immediately to all recipients
                           </span>
@@ -428,8 +602,28 @@ export default function CampaignDetailsPage() {
                       <div className="flex items-start gap-3">
                         <Calendar className="h-4 w-4 mt-0.5 text-neutral-700" />
                         <div className="flex flex-col gap-0.5 flex-1">
-                          <span className="font-medium text-sm">Schedule for Later</span>
+                          <span className="font-medium text-sm">Schedule for later</span>
                           <span className="text-xs text-neutral-500 leading-snug">Choose a specific date and time</span>
+                        </div>
+                      </div>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={() => void handleSetArchived(!c.archived)}
+                      className="py-3 cursor-pointer"
+                    >
+                      <div className="flex items-start gap-3">
+                        {c.archived ? (
+                          <ArchiveRestore className="h-4 w-4 mt-0.5 text-neutral-700" />
+                        ) : (
+                          <Archive className="h-4 w-4 mt-0.5 text-neutral-700" />
+                        )}
+                        <div className="flex flex-col gap-0.5 flex-1">
+                          <span className="font-medium text-sm">{c.archived ? 'Restore draft' : 'Archive draft'}</span>
+                          <span className="text-xs text-neutral-500 leading-snug">
+                            {c.archived
+                              ? 'Put it back on the campaigns list'
+                              : 'Hide it from the campaigns list without deleting it'}
+                          </span>
                         </div>
                       </div>
                     </DropdownMenuItem>
@@ -483,7 +677,7 @@ export default function CampaignDetailsPage() {
                       />
                       <SelectItemWithDescription
                         value={CampaignAudienceType.SEGMENT}
-                        title="Specific Segment"
+                        title="Specific segment"
                         description="Target a defined group of contacts"
                       />
                     </SelectContent>
@@ -558,7 +752,7 @@ export default function CampaignDetailsPage() {
             {/* Basic Information */}
             <Card>
               <CardHeader>
-                <CardTitle>Basic Information</CardTitle>
+                <CardTitle>Basic information</CardTitle>
                 <CardDescription>Name and describe your campaign</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -579,7 +773,7 @@ export default function CampaignDetailsPage() {
                   <Label htmlFor="description">Description</Label>
                   <Input
                     id="description"
-                    placeholder="Internal notes about this campaign"
+                    placeholder="e.g., Q2 launch, list A"
                     value={editedCampaign.description || ''}
                     onChange={e => setEditedCampaign({...editedCampaign, description: e.target.value})}
                   />
@@ -590,7 +784,7 @@ export default function CampaignDetailsPage() {
             {/* Campaign Type */}
             <Card>
               <CardHeader>
-                <CardTitle>Campaign Type</CardTitle>
+                <CardTitle>Campaign type</CardTitle>
                 <CardDescription>Choose how this campaign should be treated</CardDescription>
               </CardHeader>
               <CardContent>
@@ -644,7 +838,7 @@ export default function CampaignDetailsPage() {
           {/* Email Settings */}
           <Card>
             <CardHeader>
-              <CardTitle>Email Settings</CardTitle>
+              <CardTitle>Email settings</CardTitle>
               <CardDescription>Configure sender information and subject</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -676,7 +870,7 @@ export default function CampaignDetailsPage() {
           {/* Email Content */}
           <Card className="overflow-visible">
             <CardHeader>
-              <CardTitle>Email Content</CardTitle>
+              <CardTitle>Email content</CardTitle>
               <CardDescription>Design your email message</CardDescription>
             </CardHeader>
             <CardContent>
@@ -759,7 +953,7 @@ export default function CampaignDetailsPage() {
                   disabled={(dialog.type === 'testEmail' && dialog.sending) || !testEmailAddress}
                 >
                   <TestTube className="h-4 w-4" />
-                  {dialog.type === 'testEmail' && dialog.sending ? 'Sending...' : 'Send preview'}
+                  {dialog.type === 'testEmail' && dialog.sending ? 'Sending…' : 'Send preview'}
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -955,9 +1149,9 @@ export default function CampaignDetailsPage() {
           open={dialog.type === 'delete'}
           onOpenChange={open => !open && setDialog({type: 'none'})}
           onConfirm={handleDelete}
-          title="Delete Campaign"
-          description="Are you sure you want to delete this draft campaign? This action cannot be undone."
-          confirmText="Delete Campaign"
+          title={`Delete ${c.name}?`}
+          description="This draft and its content are gone for good."
+          confirmText="Delete campaign"
           variant="destructive"
         />
       </DashboardLayout>
@@ -979,106 +1173,218 @@ export default function CampaignDetailsPage() {
               <div className="flex items-center gap-2 sm:gap-3 mb-2">
                 <h1 className="text-2xl sm:text-3xl font-bold text-neutral-900 truncate">{c.name}</h1>
                 {getStatusBadge(c.status)}
+                {/* Explains, to someone who arrived by direct link, why this campaign is
+                    missing from the list. */}
+                {c.archived && (
+                  <Badge variant="neutral" className="shrink-0">
+                    <Archive className="h-3 w-3" />
+                    Archived
+                  </Badge>
+                )}
               </div>
               {c.description && <p className="text-neutral-500 text-sm sm:text-base">{c.description}</p>}
             </div>
           </div>
 
           {/* Actions */}
-          {(c.status === CampaignStatus.SCHEDULED || c.status === CampaignStatus.SENDING) && (
+          {c.status === CampaignStatus.SCHEDULED || c.status === CampaignStatus.SENDING ? (
             <div className="flex justify-end">
               <Button variant="destructive" onClick={() => setDialog({type: 'cancel'})} className="w-full sm:w-auto">
                 <XCircle className="h-4 w-4" />
-                <span className="hidden sm:inline">Cancel Campaign</span>
+                <span className="hidden sm:inline">Cancel campaign</span>
                 <span className="sm:hidden">Cancel</span>
+              </Button>
+            </div>
+          ) : (
+            /* SENT and CANCELLED. This region was empty for them, and it is the natural place
+               to file a campaign away: the user has just finished reading its results. */
+            <div className="flex justify-end">
+              <Button
+                variant="outline"
+                onClick={() => void handleSetArchived(!c.archived)}
+                className="w-full sm:w-auto"
+              >
+                {c.archived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
+                {c.archived ? 'Restore campaign' : 'Archive campaign'}
               </Button>
             </div>
           )}
         </div>
 
-        {/* Sending Progress Banner */}
+        {/* Sending progress. The one place a bar belongs on this page: here it really does
+            mean "part of the send is still outstanding", and it disappears once it does not. */}
         {c.status === CampaignStatus.SENDING && s && (
           <Card>
             <CardContent className="pt-6">
               <div className="space-y-4">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-4">
                   <div>
                     <h3 className="font-semibold text-neutral-900 text-lg">Sending in progress</h3>
-                    <p className="text-sm text-neutral-500 mt-1">
+                    <p className="text-sm text-neutral-500 mt-1 tabular-nums">
                       {s.sentCount.toLocaleString()} of {s.totalRecipients.toLocaleString()} emails sent
                     </p>
                   </div>
                   <div className="text-right">
-                    <div className="text-3xl font-bold text-neutral-900">
-                      {((s.sentCount / s.totalRecipients) * 100).toFixed(0)}%
+                    <div className="text-3xl font-semibold tracking-tight tabular-nums text-neutral-900">
+                      {sendProgress.toFixed(0)}%
                     </div>
                     <p className="text-xs text-neutral-500 mt-1">Complete</p>
                   </div>
                 </div>
-                <div className="w-full bg-neutral-100 rounded-full h-2">
+                <div
+                  role="progressbar"
+                  aria-valuenow={Math.round(sendProgress)}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-label="Emails sent"
+                  className="w-full bg-neutral-100 rounded-full h-2 overflow-hidden"
+                >
                   <div
-                    className="bg-neutral-900 h-2 rounded-full transition-all duration-500"
-                    style={{width: `${(s.sentCount / s.totalRecipients) * 100}%`}}
+                    className="bg-neutral-900 h-2 rounded-full transition-[width] duration-500 ease-out motion-reduce:transition-none"
+                    style={{width: `${sendProgress}%`}}
                   />
                 </div>
-                <p className="text-xs text-neutral-400">This page updates automatically every 5 seconds</p>
+                <p className="text-xs text-neutral-400">Updating every 15 seconds</p>
               </div>
             </CardContent>
           </Card>
         )}
 
-        {/* Stats Cards */}
-        {s && (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium text-neutral-500">Total Recipients</CardTitle>
-                <Users className="h-4 w-4 text-neutral-400" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold text-neutral-900">{s.totalRecipients.toLocaleString()}</div>
-                <p className="text-xs text-neutral-500 mt-2">
-                  {s.sentCount.toLocaleString()} sent ({((s.sentCount / s.totalRecipients) * 100).toFixed(1)}%)
+        {/* Results. Only from the moment sending starts: a scheduled campaign has nothing to
+            report yet, and its audience and send time are already in Campaign info below. */}
+        {hasResults && statsError && !s && (
+          <Card className="border-red-200 bg-red-50">
+            <CardContent className="pt-6">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 text-red-700">
+                  <AlertCircle className="h-5 w-5 shrink-0" />
+                  <span>Couldn{"'"}t load results. Try again in a moment.</span>
+                </div>
+                <Button variant="outline" size="sm" onClick={() => void mutateStats()}>
+                  Try again
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {hasResults && !s && !statsError && (
+          <Card>
+            <CardHeader>
+              <Skeleton className="h-5 w-24" />
+              <Skeleton className="h-4 w-72" />
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="space-y-2">
+                <Skeleton className="h-12 w-48" />
+                <Skeleton className="h-4 w-72" />
+              </div>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-5 border-t border-neutral-100 pt-5 sm:grid-cols-3 lg:grid-cols-5">
+                {Array.from({length: 5}).map((_, i) => (
+                  <div key={i} className="space-y-2">
+                    <Skeleton className="h-3 w-16" />
+                    <Skeleton className="h-5 w-12" />
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/*
+          One panel, one focal point. Opens are the headline because "did anyone read it" is
+          the question this screen exists to answer; everything else is a supporting column
+          under it, so the reader finds the answer before they start scanning.
+
+          There is deliberately no bar here. The previous version drew opens as a filled
+          track, and readers took a part-full bar on a finished campaign to mean the send
+          itself was part-finished. A percentage that says what it measures cannot be
+          misread that way.
+        */}
+        {hasResults && s && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Results</CardTitle>
+              <CardDescription>
+                {`Sent to ${s.sentCount.toLocaleString()} ${s.sentCount === 1 ? 'contact' : 'contacts'}`}
+                {c.sentAt ? ` on ${formatFullDateTime(new Date(c.sentAt))}` : ''}.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {/* Headline */}
+              <div>
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                  <span className="text-4xl sm:text-5xl font-semibold tracking-tight tabular-nums text-neutral-900">
+                    <AnimatedNumber value={s.openedCount} />
+                  </span>
+                  <span className="text-lg font-medium text-neutral-500">
+                    {s.openedCount === 1 ? 'open' : 'opens'}
+                  </span>
+                </div>
+                <p className="mt-2 text-sm text-neutral-500">
+                  {s.sentCount > 0
+                    ? `${s.openRate.toFixed(1)}% open rate, measured against the ${s.sentCount.toLocaleString()} ${
+                        s.sentCount === 1 ? 'email' : 'emails'
+                      } sent`
+                    : 'Nothing has been sent yet'}
                 </p>
-              </CardContent>
-            </Card>
+              </div>
 
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium text-neutral-500">Delivery Rate</CardTitle>
-                <Mail className="h-4 w-4 text-neutral-400" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold text-neutral-900">{s.deliveryRate.toFixed(1)}%</div>
-                <p className="text-xs text-neutral-500 mt-2">
-                  {s.deliveredCount.toLocaleString()} delivered
-                  {s.bouncedCount > 0 && `, ${s.bouncedCount} bounced`}
+              {/* Supporting figures, in funnel order. Bounced and Spam reports open the
+                  contacts behind them; a figure with nobody in it stays inert, because a
+                  button that opens an empty list is a button that wasted a click. */}
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-5 border-t border-neutral-100 pt-5 sm:grid-cols-3 lg:grid-cols-5 lg:gap-x-0">
+                {SUPPORTING_FIGURES.map(figure => {
+                  const value = (
+                    <>
+                      <span className={`text-xl font-semibold tabular-nums ${figureTone(figure, s)}`}>
+                        {figure.count(s).toLocaleString()}
+                      </span>
+                      {s.sentCount > 0 && (
+                        <span className="text-xs tabular-nums text-neutral-500">{figure.rate(s).toFixed(1)}%</span>
+                      )}
+                    </>
+                  );
+                  const openable = figure.drillDown && figure.count(s) > 0;
+
+                  return (
+                    <div
+                      key={figure.label}
+                      className="lg:border-l lg:border-neutral-100 lg:pl-5 lg:first:border-l-0 lg:first:pl-0"
+                    >
+                      <dt className="text-xs font-medium text-neutral-500">{figure.label}</dt>
+                      <dd className="mt-1">
+                        {openable ? (
+                          <button
+                            type="button"
+                            onClick={() => setRecipientList(figure.drillDown!)}
+                            className="-m-1 flex items-baseline gap-1.5 rounded-md p-1 underline decoration-neutral-300 underline-offset-4 transition-colors hover:decoration-neutral-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2"
+                          >
+                            {value}
+                            <span className="sr-only">
+                              {`Show the ${figure.count(s).toLocaleString()} ${figure.label.toLowerCase()} recipients`}
+                            </span>
+                          </button>
+                        ) : (
+                          <span className="flex items-baseline gap-1.5">{value}</span>
+                        )}
+                      </dd>
+                    </div>
+                  );
+                })}
+              </dl>
+
+              {/* Only worth a line when it happened: on a healthy campaign it is zero. */}
+              {lostContacts > 0 && (
+                <p className="border-t border-neutral-100 pt-4 text-xs text-neutral-500">
+                  <span className="font-medium tabular-nums text-neutral-900">{lostContacts.toLocaleString()}</span>{' '}
+                  {lostContacts === 1 ? 'contact' : 'contacts'} bounced, reported spam, or unsubscribed and no longer
+                  {' '}
+                  {lostContacts === 1 ? 'receives' : 'receive'} marketing from this project.
                 </p>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium text-neutral-500">Open Rate</CardTitle>
-                <TrendingUp className="h-4 w-4 text-neutral-400" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold text-neutral-900">{s.openRate.toFixed(1)}%</div>
-                <p className="text-xs text-neutral-500 mt-2">{s.openedCount.toLocaleString()} opened</p>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium text-neutral-500">Click Rate</CardTitle>
-                <MousePointer className="h-4 w-4 text-neutral-400" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold text-neutral-900">{s.clickRate.toFixed(1)}%</div>
-                <p className="text-xs text-neutral-500 mt-2">{s.clickedCount.toLocaleString()} clicked</p>
-              </CardContent>
-            </Card>
-          </div>
+              )}
+            </CardContent>
+          </Card>
         )}
 
         {/* Campaign Details in Grid */}
@@ -1086,7 +1392,7 @@ export default function CampaignDetailsPage() {
           {/* Email Content - Takes 2 columns */}
           <Card className="lg:col-span-2">
             <CardHeader>
-              <CardTitle>Email Preview</CardTitle>
+              <CardTitle>Email preview</CardTitle>
               <CardDescription>How your email will appear to recipients</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -1114,7 +1420,7 @@ export default function CampaignDetailsPage() {
 
               {/* Email Body Preview */}
               <div>
-                <p className="text-sm font-medium text-neutral-700 mb-3">Message Content</p>
+                <p className="text-sm font-medium text-neutral-700 mb-3">Message content</p>
                 <div className="border-2 border-neutral-200 rounded-lg overflow-hidden bg-white">
                   <div className="p-6 max-h-96 overflow-y-auto">
                     <div className="prose prose-sm max-w-none" dangerouslySetInnerHTML={{__html: DOMPurify.sanitize(c.body)}} />
@@ -1127,7 +1433,7 @@ export default function CampaignDetailsPage() {
           {/* Campaign Details */}
           <Card>
             <CardHeader>
-              <CardTitle>Campaign Info</CardTitle>
+              <CardTitle>Campaign info</CardTitle>
               <CardDescription>Configuration and metadata</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -1156,7 +1462,7 @@ export default function CampaignDetailsPage() {
               {/* Scheduling Info */}
               {c.scheduledFor && (
                 <div className="pb-3 border-b border-neutral-100">
-                  <p className="text-xs font-medium text-neutral-500 uppercase tracking-wide mb-2">Scheduled For</p>
+                  <p className="text-xs font-medium text-neutral-500 uppercase tracking-wide mb-2">Scheduled for</p>
                   <div className="flex items-start gap-2">
                     <Calendar className="h-4 w-4 text-neutral-400 mt-0.5" />
                     <div className="space-y-2">
@@ -1179,7 +1485,7 @@ export default function CampaignDetailsPage() {
               {/* Sent At */}
               {c.sentAt && (
                 <div className="pb-3 border-b border-neutral-100">
-                  <p className="text-xs font-medium text-neutral-500 uppercase tracking-wide mb-2">Sent On</p>
+                  <p className="text-xs font-medium text-neutral-500 uppercase tracking-wide mb-2">Sent on</p>
                   <div className="flex items-center gap-2">
                     <Send className="h-4 w-4 text-neutral-400" />
                     <p className="text-sm font-medium text-neutral-900">{formatFullDateTime(new Date(c.sentAt))}</p>
@@ -1191,13 +1497,21 @@ export default function CampaignDetailsPage() {
         </div>
       </div>
 
+      <CampaignRecipientsSheet
+        campaignId={c.id}
+        type={recipientList}
+        onClose={() => setRecipientList(null)}
+      />
+
       <ConfirmDialog
         open={dialog.type === 'cancel'}
         onOpenChange={open => !open && setDialog({type: 'none'})}
         onConfirm={handleCancel}
-        title="Cancel Campaign"
-        description="Are you sure you want to cancel this campaign?"
-        confirmText="Cancel Campaign"
+        title={cancelCopy.title}
+        description={cancelCopy.description}
+        cancelText="Keep sending"
+        icon={CircleStop}
+        confirmText={cancelCopy.confirmText}
         variant="destructive"
       />
     </DashboardLayout>

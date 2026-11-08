@@ -47,10 +47,91 @@ When the recipient clicks one of the links and confirms:
 | Action                  | Effect                                                                            |
 | ----------------------- | --------------------------------------------------------------------------------- |
 | Unsubscribe             | Contact's `subscribed` flips to `false`. `contact.unsubscribed` event fires.      |
+| Snooze                  | Contact's `subscribed` flips to `false` and `snoozedUntil` is set. `contact.unsubscribed` event fires with `reason: "snooze"`. |
 | Resubscribe             | Contact's `subscribed` flips to `true`. `contact.subscribed` event fires.         |
 | Update via preferences  | Same as above, depending on which way they toggle.                                |
 
 You can drive workflows off `contact.unsubscribed` / `contact.subscribed` (e.g. send a "we're sorry to see you go" survey, or trigger a winback when they re-opt-in).
+
+## Snoozing
+
+Not everyone who clicks unsubscribe wants to leave for good. Some are mid-launch-sequence, some are going on holiday, and some just want the volume to stop for a while. If the only option is permanent, a share of them take it — and a share of the rest reach for the spam button instead, which costs you far more.
+
+So the unsubscribe and preferences pages offer a second, secondary option: **snooze**. The recipient picks a window, receives nothing for its duration, and is resubscribed automatically when it ends.
+
+| Window     | Value passed to the API |
+| ---------- | ----------------------- |
+| 2 weeks    | `2_weeks`               |
+| 1 month    | `1_month`               |
+| 6 months   | `6_months`              |
+| 1 year     | `1_year`                |
+
+Snooze is deliberately the quieter of the two choices. Unsubscribe keeps its position and weight on the page; a recipient who came to leave never has to hunt for the button that does it.
+
+### It is a real opt-out, not a softer one
+
+A snoozed contact has `subscribed: false` for the whole window. Every send path — campaigns, workflows, and marketing templates sent through `/v1/send` — filters on that flag, so a snoozed contact receives nothing at all until they come back. Nothing is "held back and delivered later".
+
+The contact also carries a `snoozedUntil` timestamp. That is the only thing distinguishing a snooze from a permanent unsubscribe, and it exists so the return can be scheduled — it plays no part in whether mail is sent.
+
+### Coming back
+
+A background job resubscribes contacts whose window has elapsed, clears `snoozedUntil`, and fires `contact.subscribed` with `reason: "snooze_expired"`. Returns are processed within a few minutes of the window ending.
+
+A recipient can also come back early: the "resume" link on the preferences page, or any visit to `{{subscribeUrl}}`, ends the snooze immediately.
+
+### What ends a snooze early
+
+Any other change to a contact's subscription cancels the snooze and takes over — the pending return is dropped, not queued behind it:
+
+- The recipient unsubscribes properly (their snooze becomes permanent — they will not be resubscribed later).
+- The recipient, or you, resubscribes them.
+- A hard bounce or spam complaint suppresses the address. A suppressed contact is never resurrected by a snooze that was running when it happened.
+- `PATCH /contacts/:id` with `subscribed`, a CSV import that sets the column, a bulk action, or a workflow `Update contact` step.
+
+### Reacting to a snooze
+
+Snoozing reuses `contact.unsubscribed` and `contact.subscribed` rather than introducing new event names, so existing workflows, `Wait for event` steps and campaign statistics pick it up with no changes. Branch on the event's `reason` field to tell them apart:
+
+```json
+// contact.unsubscribed — the recipient snoozed
+{
+  "reason": "snooze",
+  "duration": "6_months",
+  "snoozedUntil": "2027-03-11T09:14:22.104Z"
+}
+
+// contact.subscribed — the window ended
+{
+  "reason": "snooze_expired"
+}
+```
+
+A "sorry to see you go" workflow triggered on `contact.unsubscribed` should check for `reason` and skip the ones that are snoozes — those people have not gone anywhere.
+
+### In campaign stats
+
+A snooze counts toward the campaign's unsubscribe count, the same as a permanent opt-out. It is still a deliberate opt-out that the campaign prompted, and excluding it would let a campaign that burns through goodwill look clean simply because its recipients chose to pause rather than leave.
+
+### In the dashboard
+
+Snoozed contacts show a distinct **Snoozed** badge in the contacts list, with their own option in the Status filter, so they are never counted as churn. A contact's detail page names the date they return, and the activity feed shows the snooze and the later resume as separate entries.
+
+## Knowing which email caused it
+
+The links Plunk generates at send time carry an `?e=<emailId>` parameter identifying the message they were sent in — on the `List-Unsubscribe` header, the auto-injected marketing footer, and the `{{unsubscribeUrl}}` / `{{subscribeUrl}}` / `{{manageUrl}}` variables. When the recipient acts, that email is recorded on the resulting event, and the activity feed names the campaign or workflow the opt-out came from.
+
+The parameter is carried across the hosted pages, so a recipient who lands on the preferences page and then unsubscribes is still attributed to the email they started from.
+
+A few cases are unattributed by design:
+
+- Links rendered before the email row exists — a campaign body's `{{unsubscribeUrl}}`, which is rendered once per recipient at queue time rather than at send time.
+- Changes with no email behind them: the dashboard toggle, a CSV import, and `PATCH /contacts/:id`.
+- Mail sent before this parameter existed.
+
+Attribution is what lets a campaign report how many subscribers it cost: see [campaign stats](/concepts/campaigns#stats).
+
+If you build your own opt-out surface, you can append `?e=` yourself. The value is advisory — Plunk verifies the email belongs to the contact before recording it, and the contact id in the path is what governs the change, so a missing or wrong value costs attribution and nothing else.
 
 ## Localization
 
@@ -58,7 +139,25 @@ The hosted pages and the auto-injected footer are localized into the contact's `
 
 ## Branding
 
-The pages use your project's name and logo (configurable in **Settings → Project**). For more advanced customization, send marketing as **headless** templates and build the unsubscribe surface into your own product UI — link your in-product unsubscribe controls to the same `{{unsubscribeUrl}}` for one-click revocation.
+The pages name you by your **project name**, inside the copy itself: a recipient sees "Stop receiving emails from **Acme** at **jane@example.com**?", not a logo or header. The same name already appears in the auto-injected marketing footer ("you agreed to receive emails from Acme").
+
+Because recipients read it, use the name they know you by. A project called `Test` or `acme-prod-eu` is shown to them exactly as written. You can rename a project in its settings.
+
+A small "Sent with Plunk" line below the page credits Plunk as the mail provider.
+
+For full control over the look, send marketing as **headless** templates and build the unsubscribe surface into your own product UI. Link your in-product controls to the same `{{unsubscribeUrl}}` for one-click revocation.
+
+## Using your own one-click unsubscribe endpoint
+
+Gmail and Yahoo require bulk mail to carry a one-click `List-Unsubscribe` header (RFC 8058). Plunk adds one to marketing sends, and to any send whose body contains `{{unsubscribeUrl}}` or `{{manageUrl}}`, pointing at Plunk's own endpoint.
+
+If you send headless emails and run your own preferences center, mark your unsubscribe link with `data-plunk-one-click` and Plunk points the header at it instead:
+
+```html
+<a data-plunk-one-click href="https://example.com/unsubscribe/{{id}}">Unsubscribe</a>
+```
+
+This applies to headless templates and campaigns, including workflow emails that use a headless template. Marketing emails ignore the marker and keep pointing at Plunk, because their footer links to Plunk and Plunk manages their subscriptions. To set the header on a transactional `/v1/send`, pass it in `headers`. The URL must be absolute HTTPS, and it must unsubscribe the recipient when it receives a bare `POST` with the body `List-Unsubscribe=One-Click`: mailbox providers send that request server-side, with no cookies and no user interaction. Opt-outs made there go through your endpoint, not Plunk's, so update the contact yourself (`PATCH /contacts/:id`) to keep Plunk's subscription state in step. A `List-Unsubscribe` header passed in `headers` on `/v1/send` still takes precedence over the marker.
 
 ## API reference
 
@@ -67,4 +166,15 @@ If you need to drive subscription changes programmatically rather than through t
 - `PATCH /contacts/:id` with `{ "subscribed": false }` — unsubscribe a contact.
 - `PATCH /contacts/:id` with `{ "subscribed": true }` — resubscribe.
 
-Both flips automatically emit the corresponding `contact.subscribed` / `contact.unsubscribed` event, just like the hosted pages do.
+Both flips automatically emit the corresponding `contact.subscribed` / `contact.unsubscribed` event, just like the hosted pages do. Either one also clears a running snooze.
+
+Snoozing from your own preferences UI uses the same unauthenticated endpoint the hosted pages do:
+
+```http
+POST /contacts/public/:id/snooze?e=<emailId>
+Content-Type: application/json
+
+{ "duration": "6_months" }
+```
+
+It responds with the contact's `subscribed` and `snoozedUntil`. As with the other public list-management routes, the contact id in the path is what governs the change and `?e=` is advisory attribution only.

@@ -24,6 +24,7 @@ import {
   Megaphone,
   Plus,
   Settings,
+  UserCog,
   Users,
   Workflow as WorkflowIcon,
 } from 'lucide-react';
@@ -52,14 +53,15 @@ const NAV_ACTIONS: Action[] = [
   {label: 'Templates', href: '/templates', icon: FileText, keywords: 'email design', shortcut: ['G', 'T']},
   {label: 'Workflows', href: '/workflows', icon: WorkflowIcon, keywords: 'automation trigger', shortcut: ['G', 'W']},
   {label: 'Campaigns', href: '/campaigns', icon: Megaphone, keywords: 'broadcast newsletter', shortcut: ['G', 'M']},
-  {label: 'Settings', href: '/settings', icon: Settings, keywords: 'config account billing', shortcut: ['G', ',']},
+  {label: 'Settings', href: '/settings', icon: Settings, keywords: 'config project billing', shortcut: ['G', ',']},
+  {label: 'Account', href: '/account', icon: UserCog, keywords: 'profile password delete account me', shortcut: ['G', 'U']},
 ];
 
 const CREATE_ACTIONS: Action[] = [
-  {label: 'New Campaign', href: '/campaigns/create', icon: Plus, keywords: 'create broadcast', shortcut: ['N', 'C']},
-  {label: 'New Template', href: '/templates/create', icon: Plus, keywords: 'create email design', shortcut: ['N', 'T']},
-  {label: 'New Segment', href: '/segments/new', icon: Plus, keywords: 'create group filter', shortcut: ['N', 'S']},
-  {label: 'New Workflow', href: '/workflows', icon: Plus, keywords: 'create automation trigger', shortcut: ['N', 'W']},
+  {label: 'New campaign', href: '/campaigns/create', icon: Plus, keywords: 'create broadcast', shortcut: ['N', 'C']},
+  {label: 'New template', href: '/templates/create', icon: Plus, keywords: 'create email design', shortcut: ['N', 'T']},
+  {label: 'New segment', href: '/segments/new', icon: Plus, keywords: 'create group filter', shortcut: ['N', 'S']},
+  {label: 'New workflow', href: '/workflows', icon: Plus, keywords: 'create automation trigger', shortcut: ['N', 'W']},
 ];
 
 // Chord map: first-key → second-key → action

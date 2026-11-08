@@ -1,4 +1,5 @@
 import {SES} from '@aws-sdk/client-ses';
+import {STS} from '@aws-sdk/client-sts';
 import signale from 'signale';
 
 import {
@@ -10,6 +11,13 @@ import {
   SES_CONFIGURATION_SET_NO_TRACKING,
   TRACKING_TOGGLE_ENABLED,
 } from '../app/constants.js';
+import {
+  encodeHeaderValue,
+  encodeQuotedPrintable,
+  formatFilenameParameter,
+  formatMailbox,
+  htmlToPlainText,
+} from '../utils/mime.js';
 
 /**
  * AWS SES Client
@@ -23,6 +31,41 @@ export const ses = new SES({
   },
 });
 
+/**
+ * AWS STS Client, used only to look up the account the SES credentials belong to
+ */
+const sts = new STS({
+  region: AWS_SES_REGION,
+  credentials: {
+    accessKeyId: AWS_SES_ACCESS_KEY_ID,
+    secretAccessKey: AWS_SES_SECRET_ACCESS_KEY,
+  },
+});
+
+let awsAccountId: Promise<string> | undefined;
+
+/**
+ * The AWS account the SES credentials belong to. GetCallerIdentity needs no IAM
+ * permission, so this works with any policy. Looked up once and cached; a failed
+ * lookup is not cached, so the next call tries again.
+ */
+export const getAwsAccountId = (): Promise<string> => {
+  awsAccountId ??= sts
+    .getCallerIdentity({})
+    .then(identity => {
+      if (!identity.Account) {
+        throw new Error('GetCallerIdentity returned no account');
+      }
+      return identity.Account;
+    })
+    .catch((error: unknown) => {
+      awsAccountId = undefined;
+      throw error;
+    });
+
+  return awsAccountId;
+};
+
 interface SendRawEmailParams {
   from: {
     name: string;
@@ -32,6 +75,12 @@ interface SendRawEmailParams {
   content: {
     subject: string;
     html: string;
+    /**
+     * Plain-text alternative. Derived from `html` when omitted, which is the normal
+     * path — this exists so a caller that already has a hand-written text version can
+     * supply it instead of taking the conversion.
+     */
+    text?: string;
   };
   reply?: string;
   headers?: Record<string, string> | null;
@@ -48,36 +97,18 @@ interface SendRawEmailParams {
 }
 
 /**
- * Break long lines to comply with email RFC standards
+ * Break base64 content into fixed-width lines to comply with RFC 5322's line limit.
+ *
+ * Base64 is a fixed alphabet with no significant whitespace, so it can be split at any
+ * offset. Text and HTML parts do not go through here — they are quoted-printable
+ * encoded, which breaks lines with soft breaks the recipient's client removes.
  */
-function breakLongLines(input: string, maxLineLength: number, isBase64 = false): string {
-  if (isBase64) {
-    // For base64 content, break at exact intervals without looking for spaces
-    const result = [];
-    for (let i = 0; i < input.length; i += maxLineLength) {
-      result.push(input.substring(i, i + maxLineLength));
-    }
-    return result.join('\n');
-  } else {
-    // For text content, break at spaces when possible
-    const lines = input.split('\n');
-    const result = [];
-    for (let line of lines) {
-      while (line.length > maxLineLength) {
-        let pos = maxLineLength;
-        while (pos > 0 && line[pos] !== ' ') {
-          pos--;
-        }
-        if (pos === 0) {
-          pos = maxLineLength;
-        }
-        result.push(line.substring(0, pos));
-        line = line.substring(pos).trim();
-      }
-      result.push(line);
-    }
-    return result.join('\n');
+function breakLongLines(input: string, maxLineLength: number): string {
+  const result = [];
+  for (let i = 0; i < input.length; i += maxLineLength) {
+    result.push(input.substring(i, i + maxLineLength));
   }
+  return result.join('\n');
 }
 
 /**
@@ -103,14 +134,8 @@ export async function sendRawEmail({
 
   // Format To header with names if provided
   const toHeader = to
-    .map(recipient => {
-      if (typeof recipient === 'string') {
-        return recipient;
-      } else {
-        return recipient.name ? `${recipient.name} <${recipient.email}>` : recipient.email;
-      }
-    })
-    .join(', ');
+    .map(recipient => (typeof recipient === 'string' ? recipient : formatMailbox(recipient.name, recipient.email)))
+    .join(',\n ');
 
   // Extract just email addresses for Destinations (SES requirement)
   const destinations = to.map(recipient => (typeof recipient === 'string' ? recipient : recipient.email));
@@ -131,10 +156,10 @@ export async function sendRawEmail({
   const extraHeaders = extraHeaderLines.length > 0 ? `\n${extraHeaderLines.join('\n')}` : '';
 
   // Build raw MIME message
-  let rawMessage = `From: ${from.name} <${from.email}>
+  let rawMessage = `From: ${formatMailbox(from.name, from.email)}
 To: ${toHeader}
 Reply-To: ${reply || from.email}
-Subject: ${content.subject}
+Subject: ${encodeHeaderValue(content.subject, 'Subject: '.length)}
 MIME-Version: 1.0
 Content-Type: ${rootContentType}${extraHeaders}
 
@@ -156,12 +181,29 @@ Content-Type: ${rootContentType}${extraHeaders}
     rawMessage += `Content-Type: multipart/alternative; boundary="${altBoundary}"\n\n`;
   }
 
+  // The plain-text alternative comes first: `multipart/alternative` is ordered
+  // least-rich to most-rich (RFC 2046 §5.1.4), and clients render the last part they
+  // can display. Emitting these the other way round would show plain text to everyone.
+  //
+  // Skipped entirely when the conversion yields nothing (an image-only email, say).
+  // An empty text part is worse than no text part: it is the exact shape of the
+  // filter-evasion message the spam rules are looking for.
+  const plainText = content.text ?? htmlToPlainText(content.html);
+  if (plainText.trim().length > 0) {
+    rawMessage += `--${altBoundary}
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+${encodeQuotedPrintable(plainText)}
+`;
+  }
+
   // The alternative part content (always contains HTML)
   rawMessage += `--${altBoundary}
 Content-Type: text/html; charset=utf-8
-Content-Transfer-Encoding: 7bit
+Content-Transfer-Encoding: quoted-printable
 
-${breakLongLines(content.html, 500)}
+${encodeQuotedPrintable(content.html)}
 --${altBoundary}--
 `;
 
@@ -173,9 +215,10 @@ ${breakLongLines(content.html, 500)}
 Content-Type: ${attachment.contentType}
 Content-Transfer-Encoding: base64
 Content-ID: <${attachment.contentId || attachment.filename}>
-Content-Disposition: inline; filename="${attachment.filename}"
+Content-Disposition: inline;
+ ${formatFilenameParameter(attachment.filename)}
 
-${breakLongLines(attachment.content, 76, true)}`;
+${breakLongLines(attachment.content, 76)}`;
     }
     rawMessage += `\n--${relatedBoundary}--`;
   }
@@ -187,9 +230,10 @@ ${breakLongLines(attachment.content, 76, true)}`;
       rawMessage += `\n--${mixedBoundary}
 Content-Type: ${attachment.contentType}
 Content-Transfer-Encoding: base64
-Content-Disposition: attachment; filename="${attachment.filename}"
+Content-Disposition: attachment;
+ ${formatFilenameParameter(attachment.filename)}
 
-${breakLongLines(attachment.content, 76, true)}`;
+${breakLongLines(attachment.content, 76)}`;
     }
     rawMessage += `\n--${mixedBoundary}--`;
   }
@@ -206,7 +250,9 @@ ${breakLongLines(attachment.content, 76, true)}`;
     RawMessage: {
       Data: new TextEncoder().encode(rawMessage),
     },
-    Source: `${from.name} <${from.email}>`,
+    // The address alone: the display name travels in the From header above, and Source
+    // only names the sending identity and where bounces go.
+    Source: from.email,
   });
 
   if (!response.MessageId) {
@@ -298,6 +344,40 @@ export const disableFeedbackForwarding = async (domain: string): Promise<void> =
  */
 export const deleteIdentity = async (domain: string): Promise<void> => {
   await ses.deleteIdentity({Identity: domain});
+};
+
+/**
+ * Check at startup that the configuration sets Plunk sends through exist in SES.
+ * A missing set otherwise only shows up as a failed send, with an AWS error that
+ * doesn't name the env var. The no-tracking set is only checked when it was
+ * configured explicitly, since that is the only case in which it is used.
+ * Never throws: a failed check is logged and the API keeps starting.
+ */
+export const verifyConfigurationSets = async (): Promise<void> => {
+  const sets: {envVar: string; name: string}[] = [{envVar: 'SES_CONFIGURATION_SET', name: SES_CONFIGURATION_SET}];
+  if (TRACKING_TOGGLE_ENABLED) {
+    sets.push({envVar: 'SES_CONFIGURATION_SET_NO_TRACKING', name: SES_CONFIGURATION_SET_NO_TRACKING});
+  }
+
+  for (const {envVar, name} of sets) {
+    try {
+      await ses.describeConfigurationSet({ConfigurationSetName: name});
+    } catch (error) {
+      const errorName = error instanceof Error ? error.name : undefined;
+
+      if (errorName === 'ConfigurationSetDoesNotExistException') {
+        signale.error(
+          `[SES] Configuration set "${name}" from ${envVar} does not exist in ${AWS_SES_REGION}. Emails sent through it will fail until it is created or ${envVar} is corrected.`,
+        );
+      } else if (errorName === 'AccessDenied' || errorName === 'AccessDeniedException') {
+        // Older IAM policies predate this check, so a missing permission is not a misconfiguration
+        signale.info('[SES] Skipped configuration set check: grant ses:DescribeConfigurationSet to enable it');
+        return;
+      } else {
+        signale.warn(`[SES] Could not verify configuration set "${name}" from ${envVar}:`, error);
+      }
+    }
+  }
 };
 
 /**

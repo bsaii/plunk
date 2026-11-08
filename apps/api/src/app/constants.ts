@@ -41,6 +41,11 @@ export const S3_FORCE_PATH_STYLE = validateEnv('S3_FORCE_PATH_STYLE', 'true') ==
 // Only matters for real AWS S3 (SigV4 request signing embeds the region); Minio ignores it.
 // Defaults to us-east-1 so existing Minio setups are unaffected.
 export const S3_REGION = validateEnv('S3_REGION', 'us-east-1');
+// Optional folder inside the bucket for uploads (e.g. `plunk`), so the bucket can be
+// shared with other applications. Leading and trailing slashes are ignored.
+export const S3_PREFIX = validateEnv('S3_PREFIX', '')
+  .trim()
+  .replace(/^\/+|\/+$/g, '');
 export const S3_ENABLED = S3_ACCESS_KEY_ID !== '' && S3_ACCESS_KEY_SECRET !== '';
 
 // AWS SES (required for email sending)
@@ -112,7 +117,6 @@ export const STRIPE_WEBHOOK_SECRET = validateEnv('STRIPE_WEBHOOK_SECRET', '');
 export const STRIPE_ENABLED = STRIPE_SK !== '' && STRIPE_WEBHOOK_SECRET !== '';
 
 // Stripe Pricing Configuration
-export const STRIPE_PRICE_ONBOARDING = validateEnv('STRIPE_PRICE_ONBOARDING', ''); // One-time onboarding fee
 export const STRIPE_PRICE_EMAIL_USAGE = validateEnv('STRIPE_PRICE_EMAIL_USAGE', ''); // Metered usage price for pay-per-email
 export const STRIPE_METER_EVENT_NAME = validateEnv('STRIPE_METER_EVENT_NAME', 'emails'); // Meter event name (API key in Stripe)
 
@@ -149,6 +153,9 @@ export const AUTO_PROJECT_DISABLE = validateEnv('AUTO_PROJECT_DISABLE', 'true') 
 export const DISABLE_SIGNUPS = process.env.DISABLE_SIGNUPS === 'true';
 // Controls whether email validation checks are performed on signup (default: false)
 export const VERIFY_EMAIL_ON_SIGNUP = process.env.VERIFY_EMAIL_ON_SIGNUP === 'true';
+// Controls whether the sponsor link is shown in the dashboard navigation (default: true)
+// Disable this on hosted instances where sponsorship prompts are not relevant
+export const SHOW_SPONSOR = validateEnv('SHOW_SPONSOR', 'true') === 'true';
 
 // Attachment Limits (optional)
 // Maximum total attachment size in MB (default: 10). AWS SES supports up to 40 MB.
@@ -160,11 +167,38 @@ export const MAX_ATTACHMENTS_COUNT = Number(validateEnv('MAX_ATTACHMENTS_COUNT',
 // How long a used Idempotency-Key stays claimed before it can be reused (default: 24 hours)
 export const IDEMPOTENCY_KEY_TTL_HOURS = Number(validateEnv('IDEMPOTENCY_KEY_TTL_HOURS', '24'));
 
+// API Rate Limiting
+// Per-project token buckets on the high-traffic endpoints. Each bucket has a
+// sustained rate (tokens refilled per second) and a burst ceiling (how many
+// requests can arrive at once before throttling starts). The rates below are set
+// well above normal usage — they exist to cap abuse and runaway integrations, not
+// to shape ordinary traffic.
+//
+// Opt-in: an existing deployment must never start refusing a caller's traffic
+// because it pulled a new version. Set RATE_LIMIT_ENABLED=true to switch it on,
+// then optionally set an individual *_PER_SECOND to 0 to disable just that bucket.
+export const RATE_LIMIT_ENABLED = process.env.RATE_LIMIT_ENABLED === 'true';
+
+// POST /v1/track — highest volume: event ingestion from servers and browsers
+export const RATE_LIMIT_TRACK_PER_SECOND = Number(validateEnv('RATE_LIMIT_TRACK_PER_SECOND', '100'));
+export const RATE_LIMIT_TRACK_BURST = Number(validateEnv('RATE_LIMIT_TRACK_BURST', '200'));
+
+// POST /v1/send — also bounded by the project's billing limit
+export const RATE_LIMIT_SEND_PER_SECOND = Number(validateEnv('RATE_LIMIT_SEND_PER_SECOND', '20'));
+export const RATE_LIMIT_SEND_BURST = Number(validateEnv('RATE_LIMIT_SEND_BURST', '50'));
+
+// Contact writes (create/update/delete) — real-time sync from external systems
+export const RATE_LIMIT_CONTACTS_PER_SECOND = Number(validateEnv('RATE_LIMIT_CONTACTS_PER_SECOND', '50'));
+export const RATE_LIMIT_CONTACTS_BURST = Number(validateEnv('RATE_LIMIT_CONTACTS_BURST', '100'));
+
 // Email Verification & Password Reset
 export const TOKEN_EXPIRY_SECONDS = 3600; // 1 hour
 export const EMAIL_VERIFICATION_RATE_LIMIT = 3; // Max 3 emails per hour
 export const PASSWORD_RESET_RATE_LIMIT = 3; // Max 3 emails per hour
 export const EMAIL_VERIFICATION_RATE_WINDOW = 3600; // 1 hour in seconds
+// Authenticated password change: bounds guesses at the current password
+export const PASSWORD_CHANGE_RATE_LIMIT = 5; // Max 5 attempts per window
+export const PASSWORD_CHANGE_RATE_WINDOW = 900; // 15 minutes in seconds
 
 // Phishing Detection (optional)
 // OpenRouter API integration for content safety checks

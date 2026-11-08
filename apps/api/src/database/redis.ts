@@ -2,6 +2,7 @@ import {Redis} from 'ioredis';
 import type {RedisOptions} from 'ioredis';
 
 import {REDIS_URL} from '../app/constants.js';
+import {parseRedisUrl} from '../utils/redis.js';
 
 /**
  * Forces IPv4 (`family: 4`, ioredis's own default — made explicit here so it can't
@@ -22,16 +23,8 @@ export const redis = new Redis(REDIS_URL, {family: 4});
  * IPv4 — see the comment on `redis` above for why.
  */
 export function getBullMqRedisOptions(url: string): RedisOptions {
-  const parsed = new URL(url);
-
-  return {
-    host: parsed.hostname,
-    port: parseInt(parsed.port || '6379', 10),
-    password: parsed.password || undefined,
-    db: parseInt(parsed.pathname.slice(1) || '0', 10),
-    family: 4,
-    ...(parsed.protocol === 'rediss:' ? {tls: {}} : {}),
-  };
+  // parseRedisUrl keeps the ACL username and the `rediss:` TLS scheme; family: 4 is ours.
+  return {...parseRedisUrl(url), family: 4};
 }
 
 export const REDIS_ONE_MINUTE = 60;

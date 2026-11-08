@@ -21,6 +21,7 @@ import {DashboardLayout} from '../../components/DashboardLayout';
 import {KeyValueEditor} from '../../components/KeyValueEditor';
 import {ActivityFeed} from '../../components/ActivityFeed';
 import {network} from '../../lib/network';
+import {contactStatus, formatSnoozedUntil} from '../../lib/contactStatus';
 import {toast} from 'sonner';
 import useSWR from 'swr';
 import {ContactSchemas} from '@plunk/shared';
@@ -57,10 +58,10 @@ export default function ContactDetailPage() {
         },
         typeof ContactSchemas.create
       >('PATCH', `/contacts/${id}`, {email, subscribed, data: customData});
-      toast.success('Contact updated successfully');
+      toast.success('Contact updated');
       void mutate();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to update contact');
+      toast.error(error instanceof Error ? error.message : 'Couldn’t save the contact. Try again.');
     } finally {
       setIsSubmitting(false);
     }
@@ -69,10 +70,10 @@ export default function ContactDetailPage() {
   const handleDelete = async () => {
     try {
       await network.fetch('DELETE', `/contacts/${id}`);
-      toast.success('Contact deleted successfully');
+      toast.success('Contact deleted');
       void router.push('/contacts');
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to delete contact');
+      toast.error(error instanceof Error ? error.message : 'Couldn’t delete the contact. Try again.');
     }
   };
 
@@ -83,7 +84,7 @@ export default function ContactDetailPage() {
       setTimeout(() => setCopiedId(null), 2000);
       toast.success(`${label} copied to clipboard`);
     } catch {
-      toast.error('Failed to copy');
+      toast.error('Couldn’t copy to your clipboard.');
     }
   };
 
@@ -108,13 +109,15 @@ export default function ContactDetailPage() {
           <Button asChild>
             <Link href="/contacts">
               <ArrowLeft className="h-4 w-4" />
-              Back to Contacts
+              Back to contacts
             </Link>
           </Button>
         </div>
       </DashboardLayout>
     );
   }
+
+  const status = contactStatus(contact);
 
   return (
     <>
@@ -129,20 +132,34 @@ export default function ContactDetailPage() {
               </Button>
               <div className="min-w-0">
                 <h1 className="text-2xl sm:text-3xl font-bold text-neutral-900 truncate">{contact.email}</h1>
+                {/*
+                  A snoozed contact is `subscribed = false`, so without the date this header
+                  would report a temporary pause as a lost subscriber. The return date is the
+                  one thing an operator looking at a snoozed contact wants to know, so it goes
+                  in the most prominent slot on the page rather than in the form below.
+                */}
                 <p className="mt-1">
                   <span
                     className={`inline-flex items-center px-2 sm:px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                      contact.subscribed ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                      status === 'subscribed'
+                        ? 'bg-green-100 text-green-800'
+                        : status === 'snoozed'
+                          ? 'bg-neutral-100 text-neutral-700'
+                          : 'bg-red-100 text-red-800'
                     }`}
                   >
-                    {contact.subscribed ? 'Subscribed' : 'Unsubscribed'}
+                    {status === 'snoozed'
+                      ? `Snoozed until ${formatSnoozedUntil(contact.snoozedUntil)}`
+                      : status === 'subscribed'
+                        ? 'Subscribed'
+                        : 'Unsubscribed'}
                   </span>
                 </p>
               </div>
             </div>
             <Button variant="destructive" onClick={() => setShowDeleteDialog(true)} className="flex-shrink-0">
               <Trash2 className="h-4 w-4" />
-              <span className="hidden sm:inline">Delete Contact</span>
+              <span className="hidden sm:inline">Delete contact</span>
             </Button>
           </div>
 
@@ -151,12 +168,12 @@ export default function ContactDetailPage() {
             <div className="lg:col-span-2 space-y-6">
               <Card>
                 <CardHeader>
-                  <CardTitle>Contact Information</CardTitle>
+                  <CardTitle>Contact information</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <form onSubmit={handleSubmit} className="space-y-4">
                     <div>
-                      <Label htmlFor="email">Email Address</Label>
+                      <Label htmlFor="email">Email address</Label>
                       <Input
                         id="email"
                         type="email"
@@ -173,7 +190,14 @@ export default function ContactDetailPage() {
                           Subscribed to emails
                         </Label>
                         <p className="text-xs text-neutral-500 mt-0.5">
-                          {subscribed ? 'Receives emails from campaigns and workflows' : 'Will not receive emails'}
+                          {subscribed
+                            ? 'Receives emails from campaigns and workflows'
+                            : status === 'snoozed'
+                              ? // Saying only "will not receive emails" would hide the fact that
+                                // this reverses itself, and that turning the switch on here is
+                                // what ends it early.
+                                `Snoozed — resumes automatically on ${formatSnoozedUntil(contact.snoozedUntil)}`
+                              : 'Will not receive emails'}
                         </p>
                       </div>
                       <Switch id="subscribed" checked={subscribed} onCheckedChange={setSubscribed} />
@@ -191,7 +215,7 @@ export default function ContactDetailPage() {
 
                     <Button type="submit" disabled={isSubmitting}>
                       <Save className="h-4 w-4" />
-                      {isSubmitting ? 'Saving...' : 'Save Changes'}
+                      {isSubmitting ? 'Saving…' : 'Save Changes'}
                     </Button>
                   </form>
                 </CardContent>
@@ -202,7 +226,8 @@ export default function ContactDetailPage() {
                 <CardHeader>
                   <CardTitle>Activity</CardTitle>
                 </CardHeader>
-                <CardContent>
+                {/* The feed brings its own row padding and day headings */}
+                <CardContent className="border-t border-neutral-100 p-0">
                   <ActivityFeed contactId={id as string} />
                 </CardContent>
               </Card>
@@ -266,7 +291,7 @@ export default function ContactDetailPage() {
                   </div>
 
                   <div>
-                    <p className="text-sm font-medium text-neutral-900">Last Updated</p>
+                    <p className="text-sm font-medium text-neutral-900">Last updated</p>
                     <div className="group relative inline-block cursor-help">
                       <p className="text-sm text-neutral-500">{dayjs(contact.updatedAt).fromNow()}</p>
                       <div className="hidden group-hover:block absolute z-10 w-48 p-2 bg-neutral-900 text-white text-xs rounded shadow-md bottom-full left-0 mb-1 whitespace-nowrap">
@@ -280,11 +305,11 @@ export default function ContactDetailPage() {
               {/* Public Links Card */}
               <Card>
                 <CardHeader>
-                  <CardTitle>Public Links</CardTitle>
+                  <CardTitle>Public links</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-neutral-700">Subscribe Page</p>
+                    <p className="text-xs font-medium text-neutral-700">Subscribe page</p>
                     <div className="flex gap-2">
                       <Button
                         variant="outline"
@@ -335,7 +360,7 @@ export default function ContactDetailPage() {
                   </div>
 
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-neutral-700">Unsubscribe Page</p>
+                    <p className="text-xs font-medium text-neutral-700">Unsubscribe page</p>
                     <div className="flex gap-2">
                       <Button
                         variant="outline"
@@ -386,7 +411,7 @@ export default function ContactDetailPage() {
                   </div>
 
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-neutral-700">Manage Preferences</p>
+                    <p className="text-xs font-medium text-neutral-700">Manage preferences</p>
                     <div className="flex gap-2">
                       <Button
                         variant="outline"
@@ -445,9 +470,9 @@ export default function ContactDetailPage() {
           open={showDeleteDialog}
           onOpenChange={setShowDeleteDialog}
           onConfirm={handleDelete}
-          title="Delete Contact"
-          description="Are you sure you want to delete this contact? This action cannot be undone."
-          confirmText="Delete"
+          title={`Delete ${contact.email}?`}
+          description="Their events and email history are deleted too. This can't be undone."
+          confirmText="Delete contact"
           variant="destructive"
         />
       </DashboardLayout>

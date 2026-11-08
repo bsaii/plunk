@@ -10,9 +10,17 @@ import {Worker} from 'bullmq';
 import signale from 'signale';
 
 import {createApiRequestCleanupWorker} from './api-request-cleanup-processor.js';
+import {buildBackgroundIndexes} from './background-index-builder.js';
 import {createIdempotencyKeyCleanupWorker} from './idempotency-key-cleanup-processor.js';
 import {createBulkContactWorker} from './bulk-contact-processor.js';
+import {createCampaignCancelCleanupWorker} from './campaign-cancel-cleanup-processor.js';
 import {createCampaignWorker} from './campaign-processor.js';
+import {createCardVerificationWorker} from './card-verification-processor.js';
+import {createContactFieldsWorker} from './contact-fields-processor.js';
+import {createCampaignStatsSweepWorker} from './campaign-stats-sweep-processor.js';
+import {createScheduledEmailSweepWorker} from './scheduled-email-sweep-processor.js';
+import {createSnoozeSweepWorker} from './snooze-sweep-processor.js';
+import {createCardVerificationSweepWorker} from './card-verification-sweep-processor.js';
 import {createDomainVerificationWorker} from './domain-verification-processor.js';
 import {createEmailBodyCleanupWorker} from './email-body-cleanup-processor.js';
 import {createEmailWorker} from './email-processor.js';
@@ -37,6 +45,26 @@ async function startWorkers() {
     const campaignWorker = createCampaignWorker();
     workers.push({name: 'campaign', worker: campaignWorker});
     signale.success('[WORKER] Campaign worker started');
+
+    // Start campaign cancel cleanup worker
+    const campaignCancelCleanupWorker = createCampaignCancelCleanupWorker();
+    workers.push({name: 'campaign-cancel-cleanup', worker: campaignCancelCleanupWorker});
+    signale.success('[WORKER] Campaign cancel cleanup worker started');
+
+    // Start campaign stats reconcile sweep worker
+    const campaignStatsSweepWorker = createCampaignStatsSweepWorker();
+    workers.push({name: 'campaign-stats-sweep', worker: campaignStatsSweepWorker});
+    signale.success('[WORKER] Campaign stats sweep worker started');
+
+    // Start snooze sweep worker
+    const snoozeSweepWorker = createSnoozeSweepWorker();
+    workers.push({name: 'snooze-sweep', worker: snoozeSweepWorker});
+    signale.success('[WORKER] Snooze sweep worker started');
+
+    // Start scheduled email sweep worker
+    const scheduledEmailSweepWorker = createScheduledEmailSweepWorker();
+    workers.push({name: 'scheduled-email-sweep', worker: scheduledEmailSweepWorker});
+    signale.success('[WORKER] Scheduled email sweep worker started');
 
     // Start scheduled campaign worker
     const scheduledWorker = createScheduledCampaignWorker();
@@ -63,6 +91,11 @@ async function startWorkers() {
     workers.push({name: 'segment-count', worker: segmentCountWorker});
     signale.success('[WORKER] Segment count worker started');
 
+    // Start contact fields worker
+    const contactFieldsWorker = createContactFieldsWorker();
+    workers.push({name: 'contact-fields', worker: contactFieldsWorker});
+    signale.success('[WORKER] Contact fields worker started');
+
     // Start domain verification worker
     const domainVerificationWorker = createDomainVerificationWorker();
     workers.push({name: 'domain-verification', worker: domainVerificationWorker});
@@ -88,7 +121,20 @@ async function startWorkers() {
     workers.push({name: 'meter', worker: meterWorker});
     signale.success('[WORKER] Meter worker started');
 
+    // Start card verification worker
+    const cardVerificationWorker = createCardVerificationWorker();
+    workers.push({name: 'card-verification', worker: cardVerificationWorker});
+    signale.success('[WORKER] Card verification worker started');
+
+    // Start card verification sweep worker
+    const cardVerificationSweepWorker = createCardVerificationSweepWorker();
+    workers.push({name: 'card-verification-sweep', worker: cardVerificationSweepWorker});
+    signale.success('[WORKER] Card verification sweep worker started');
+
     signale.success('[WORKER] All workers started successfully');
+
+    // Not awaited: index builds can take a long time and must not hold up job processing
+    void buildBackgroundIndexes();
   } catch (error) {
     signale.error('[WORKER] Failed to start workers:', error);
     process.exit(1);
