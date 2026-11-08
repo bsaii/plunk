@@ -65,11 +65,11 @@ api_env_vars = {
   LANDING_URI   = "REPLACE_WITH_YOUR_LANDING_URI" # e.g. https://www.example.com
   WIKI_URI      = "REPLACE_WITH_YOUR_WIKI_URI"    # e.g. https://docs.example.com — optional, delete the key to skip
 
-  # Signups are open while this is "false" (also the app's default). Use this window to
-  # create your first accounts on a fresh database, then set it to "true" and apply to
-  # close signups (email/password and GitHub/Google OAuth). Existing users can still log in.
-  # Only the API reads it; the web app picks it up from the API.
-  DISABLE_SIGNUPS = "false"
+  # Signups are closed (email/password and GitHub/Google OAuth). Existing users can still
+  # log in. To create accounts (e.g. the first one on a fresh database), set this to "false"
+  # and apply, then set it back to "true". Only the API reads it; the web app picks it up
+  # from the API.
+  DISABLE_SIGNUPS = "true"
 
   # Tells app.ts NOT to register the 5 maintenance sweeps as BullMQ in-process
   # repeatable jobs on boot — this deployment runs them instead as Cloud
